@@ -1,0 +1,18 @@
+# Netlify 部署配置
+# 前端是纯静态页，不需要构建：直接把 public/ 目录发布出去即可。
+# 注意：Render 上跑的是同一个仓库里的 Node 后端，两者互不影响。
+
+[build]
+  publish = "public"
+
+# 单页应用，所有路径都回落到 index.html（房间号走 #hash，本身不影响）
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "no-referrer"

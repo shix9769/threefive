@@ -1,0 +1,1096 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>多人五子棋</title>
+<!-- SECTION: backend-config -->
+<script>
+/* ============================================================
+ * ★★★ 唯一需要修改的部署配置 ★★★
+ * 后端（Render）地址：
+ *   · 本地测试：留空字符串 ''（自动使用当前页面的同源地址）
+ *   · 线上部署：改成 Render 地址，例如 'https://threefive.onrender.com'
+ * 注意：不要带结尾的斜杠。
+ * ============================================================ */
+window.GOMOKU_SERVER = '';
+</script>
+<!-- SECTION: styles -->
+<style>
+:root{
+  --bg:#f6f1e7;
+  --card:#fffdf8;
+  --ink:#3a3226;
+  --ink-soft:#8a7f6d;
+  --line:#e5dcc9;
+  --gold:#c9a24b;
+  --black-stone:#26282e;
+  --white-stone:#f4f4f2;
+  --red-stone:#d84b3f;
+  --blue-stone:#3b6fd4;
+  --accent:#b0793a;
+  --radius:16px;
+  --shadow:0 2px 10px rgba(90,70,30,.08);
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;
+  background:var(--bg);
+  color:var(--ink);
+  display:flex;justify-content:center;
+  padding:16px 12px calc(16px + env(safe-area-inset-bottom));
+}
+.app{width:100%;max-width:560px;display:flex;flex-direction:column;gap:12px}
+
+/* SECTION: header */
+.header{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.title{font-size:22px;font-weight:700;letter-spacing:2px;display:flex;align-items:center;gap:8px}
+.title .mini-stones{display:inline-flex;gap:3px}
+.title .mini-stones i{width:12px;height:12px;border-radius:50%;display:inline-block}
+.title .mini-stones i:nth-child(1){background:var(--black-stone)}
+.title .mini-stones i:nth-child(2){background:var(--white-stone);border:1px solid #d8d2c4}
+.title .mini-stones i:nth-child(3){background:var(--red-stone)}
+.title .mini-stones i:nth-child(4){background:var(--blue-stone)}
+.room-chip{display:flex;align-items:center;gap:8px;background:var(--card);border:1px solid var(--line);border-radius:999px;padding:6px 8px 6px 14px;box-shadow:var(--shadow)}
+.room-chip .label{font-size:12px;color:var(--ink-soft)}
+.room-chip .code{font-size:15px;font-weight:700;letter-spacing:2px;color:var(--accent)}
+.btn{
+  border:1px solid var(--line);background:var(--card);color:var(--ink);
+  font-size:14px;border-radius:999px;padding:10px 16px;min-height:40px;
+  cursor:pointer;transition:transform .12s ease,background .2s;
+}
+.btn:active{transform:scale(.96)}
+.btn.small{padding:7px 12px;min-height:34px;font-size:13px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff;font-weight:600}
+.btn.primary:hover{background:#9c6a31}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+
+/* SECTION: players */
+.players{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.pcard{
+  background:var(--card);border:1.5px solid var(--line);border-radius:var(--radius);
+  padding:10px 6px;display:flex;flex-direction:column;align-items:center;gap:5px;
+  box-shadow:var(--shadow);position:relative;transition:border-color .25s,box-shadow .25s;
+}
+.pcard .stone{width:26px;height:26px;border-radius:50%;position:relative}
+.pcard .stone.black{background:radial-gradient(circle at 34% 30%,#5a5d66,var(--black-stone) 60%)}
+.pcard .stone.white{background:radial-gradient(circle at 34% 30%,#ffffff,#d9d9d4 75%);border:1px solid #d5cfc0}
+.pcard .stone.red{background:radial-gradient(circle at 34% 30%,#f0796c,#b33026 75%)}
+.pcard .stone.blue{background:radial-gradient(circle at 34% 30%,#7fa3ee,#274f9e 75%)}
+.pcard .pname{font-size:13px;font-weight:600}
+.pcard .ptag{font-size:11px;color:var(--ink-soft);text-align:center}
+.pcard.active{border-color:var(--gold);box-shadow:0 0 0 3px rgba(201,162,75,.25)}
+.pcard.active::after{
+  content:"落子中";position:absolute;top:-9px;right:-6px;background:var(--gold);color:#fff;
+  font-size:10px;padding:2px 7px;border-radius:999px;letter-spacing:1px;
+}
+.pcard.offline{opacity:.55}
+.pcard.offline .ptag{color:#c0392b}
+.pcard.ranked{border-color:#3aa06b;box-shadow:0 0 0 3px rgba(58,160,107,.22)}
+.pcard .rank{
+  position:absolute;top:-9px;right:-6px;background:#3aa06b;color:#fff;
+  font-size:10px;padding:2px 7px;border-radius:999px;font-weight:700;
+}
+
+/* SECTION: board */
+.board-wrap{
+  background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  box-shadow:var(--shadow);padding:10px;position:relative;
+}
+#board{width:100%;display:block;border-radius:10px;touch-action:manipulation;cursor:pointer}
+.status{
+  text-align:center;font-size:14px;color:var(--ink-soft);min-height:22px;
+  padding:2px 8px;line-height:22px;
+}
+
+/* SECTION: overlay */
+.overlay{
+  position:fixed;inset:0;background:rgba(58,50,38,.45);backdrop-filter:blur(3px);
+  display:flex;align-items:center;justify-content:center;padding:24px;z-index:50;
+}
+.overlay[hidden]{display:none}
+.panel{
+  background:var(--card);border-radius:20px;padding:28px 22px;width:100%;max-width:380px;
+  text-align:center;box-shadow:0 12px 40px rgba(0,0,0,.18);
+  max-height:88vh;overflow-y:auto;
+}
+.panel h2{font-size:20px;margin-bottom:8px}
+.panel p{font-size:14px;color:var(--ink-soft);line-height:1.7;margin-bottom:14px}
+.panel .big-code{font-size:30px;font-weight:800;letter-spacing:6px;color:var(--accent);margin:6px 0 4px}
+.panel .seats{display:flex;justify-content:center;gap:10px;margin:14px 0 16px;flex-wrap:wrap}
+.panel .seat{display:flex;flex-direction:column;align-items:center;gap:6px;font-size:12px;color:var(--ink-soft)}
+.panel .seat i{width:30px;height:30px;border-radius:50%;display:block}
+.panel .seat i.black{background:var(--black-stone)}
+.panel .seat i.white{background:var(--white-stone);border:1px solid #d5cfc0}
+.panel .seat i.red{background:var(--red-stone)}
+.panel .seat i.blue{background:var(--blue-stone)}
+.panel .seat.empty i{background:repeating-conic-gradient(#e8e0cf 0 25%,#f6f1e7 0 50%);border:1.5px dashed #c9bfa8}
+.panel .seat.joined i{box-shadow:0 0 0 3px rgba(58,160,107,.35)}
+.panel .actions{display:flex;flex-direction:column;gap:10px}
+.hint{font-size:12px;color:var(--ink-soft);margin-top:14px;line-height:1.6}
+
+/* SECTION: mode-picker */
+.modes{display:flex;gap:8px;justify-content:center;margin:4px 0 14px;flex-wrap:wrap}
+.mode-btn{
+  border:1.5px solid var(--line);background:#fff;border-radius:999px;
+  padding:10px 14px;min-height:40px;font-size:13px;cursor:pointer;color:var(--ink);
+  transition:border-color .2s,background .2s;
+}
+.mode-btn.sel{border-color:var(--accent);background:var(--accent);color:#fff;font-weight:600}
+.mode-label{font-size:13px;color:var(--ink-soft);margin-bottom:12px}
+
+/* SECTION: result-list */
+.rank-list{display:flex;flex-direction:column;gap:8px;margin:14px 0 18px;text-align:left}
+.rank-item{display:flex;align-items:center;gap:10px;background:#f8f3e8;border-radius:12px;padding:9px 12px;font-size:14px}
+.rank-item .dot{width:20px;height:20px;border-radius:50%;flex:none}
+.rank-item .who{font-weight:600}
+.rank-item .place{margin-left:auto;font-weight:700;color:var(--accent);flex:none}
+
+/* SECTION: toast */
+#toast{
+  position:fixed;left:50%;bottom:calc(28px + env(safe-area-inset-bottom));transform:translateX(-50%) translateY(20px);
+  background:rgba(58,50,38,.92);color:#fff;font-size:13px;padding:9px 18px;border-radius:999px;
+  opacity:0;pointer-events:none;transition:opacity .25s,transform .25s;z-index:60;max-width:86vw;text-align:center;
+}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+@media (prefers-reduced-motion: reduce){
+  *{transition:none!important;animation:none!important}
+}
+@media (max-width:420px){
+  .pcard .stone{width:22px;height:22px}
+  .pcard .pname{font-size:12px}
+  .title{font-size:19px}
+}
+@media (min-width:900px){
+  .app{max-width:620px}
+  .title{font-size:26px}
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- SECTION: header -->
+  <header class="header">
+    <div class="title"><span class="mini-stones"><i></i><i></i><i></i><i></i></span>多人五子棋</div>
+    <div class="room-chip">
+      <span class="label">房间</span>
+      <span class="code" id="roomCode">----</span>
+      <button class="btn small" id="btnShare" data-primary-action>分享链接</button>
+    </div>
+  </header>
+
+  <!-- SECTION: players -->
+  <div class="players" id="playerCards"></div>
+
+  <!-- SECTION: board -->
+  <div class="board-wrap">
+    <canvas id="board"></canvas>
+  </div>
+  <div class="status" id="status">正在连接…</div>
+
+  <div style="display:flex;gap:10px;justify-content:center">
+    <button class="btn" id="btnRestart" data-primary-action disabled>再来一局</button>
+    <button class="btn" id="btnNewRoom">新房间</button>
+  </div>
+</div>
+
+<!-- SECTION: overlay-waiting -->
+<div class="overlay" id="overlayWait" hidden>
+  <div class="panel">
+    <h2 id="waitTitle">等待玩家加入</h2>
+    <p id="waitDesc">把链接发给朋友，玩家到齐自动开局</p>
+    <div class="big-code" id="waitCode"></div>
+    <div id="modeArea"></div>
+    <div class="seats" id="waitSeats"></div>
+    <div class="actions">
+      <button class="btn primary" id="btnShare2">复制邀请链接</button>
+    </div>
+    <div class="hint" id="waitHint">先连成五子者胜出；自由战中胜出者锁定名次，其余人继续对决直至分出全部名次</div>
+  </div>
+</div>
+
+<!-- SECTION: overlay-result -->
+<div class="overlay" id="overlayResult" hidden>
+  <div class="panel">
+    <h2 id="resultTitle"></h2>
+    <p id="resultDesc"></p>
+    <div class="rank-list" id="resultList"></div>
+    <div class="actions">
+      <button class="btn primary" id="btnRestart2" data-primary-action>再来一局</button>
+    </div>
+  </div>
+</div>
+
+<!-- SECTION: overlay-error -->
+<div class="overlay" id="overlayError" hidden>
+  <div class="panel">
+    <h2 id="errTitle">连接失败</h2>
+    <p id="errDesc"></p>
+    <div class="actions">
+      <button class="btn primary" id="btnNewRoom2">创建新房间</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<!-- SECTION: game-script -->
+<script>
+(function(){
+  'use strict';
+  var N = 15, TOTAL = N * N;
+  var COLORS = [
+    {key:'black', name:'黑方'},
+    {key:'white', name:'白方'},
+    {key:'red',   name:'红方'},
+    {key:'blue',  name:'蓝方'}
+  ];
+  var MODES = {
+    ffa3:  {seats:3, team:false, label:'三人自由战'},
+    ffa4:  {seats:4, team:false, label:'四人自由战'},
+    team4: {seats:4, team:true,  label:'四人组队 2v2'}
+  };
+  // 后端地址：线上部署时在 <head> 里配置 window.GOMOKU_SERVER
+  var BACKEND_URL = (window.GOMOKU_SERVER || '').replace(/\/+$/, '') || location.origin;
+  var CODE_CHARS = 'abcdefghjkmnpqrstuvwxyz23456789';
+
+  /* ---------- DOM refs ---------- */
+  var canvas = document.getElementById('board');
+  var ctx = canvas.getContext('2d');
+  var elStatus = document.getElementById('status');
+  var elRoomCode = document.getElementById('roomCode');
+  var elPlayerCards = document.getElementById('playerCards');
+  var overlayWait = document.getElementById('overlayWait');
+  var overlayResult = document.getElementById('overlayResult');
+  var overlayError = document.getElementById('overlayError');
+  var btnRestart = document.getElementById('btnRestart');
+
+  /* ---------- runtime state ---------- */
+  var socket = null;                 // socket.io 连接
+  var socketConnectedOnce = false;   // 首次连接完成标记（重连不再重复建房）
+  var isHost = false;
+  var joined = false;                // 房客是否已拿到座位
+  var mySeat = -1;
+  var roomCode = '';
+  var clientConns = [null,null,null,null];  // 房主视角：seat -> guestId
+  var guestSeatMap = {};                    // 房主视角：guestId -> seat
+  var S = null;
+  var cellPx = 24;
+
+  function freshState(mode){
+    return {
+      mode: mode || 'ffa3',
+      board: new Array(TOTAL).fill(0),
+      turn: 0,
+      ranks: [],        // 按名次先后记录的座位号（自由战逐次锁定；组队为胜方两人）
+      winLines: [],     // [{seat, cells}]
+      last: -1,
+      joined: [true,false,false,false],
+      connected: [true,false,false,false],
+      moves: 0,
+      over: false
+    };
+  }
+
+  /* ---------- mode helpers ---------- */
+  function seatCount(){ return MODES[S.mode].seats; }
+  function isTeam(){ return MODES[S.mode].team; }
+  function stoneVal(seat){ return isTeam() ? (seat % 2) + 1 : seat + 1; }
+  function seatColor(seat){ return isTeam() ? COLORS[seat % 2] : COLORS[seat]; }
+  function seatName(seat){
+    if (!isTeam()) return COLORS[seat].name;
+    return (seat % 2 === 0 ? '黑队' : '白队') + (seat < 2 ? '·甲' : '·乙');
+  }
+  function rankOf(seat){ return S.ranks.indexOf(seat); }
+  function joinedCount(){
+    var c = 0, cap = seatCount();
+    for (var i=0;i<cap;i++) if (S.joined[i]) c++;
+    return c;
+  }
+  function allHere(){ return joinedCount() === seatCount(); }
+
+  /* ---------- utils ---------- */
+  function genCode(len){
+    var s = '';
+    var arr = new Uint32Array(len);
+    if (window.crypto && crypto.getRandomValues) crypto.getRandomValues(arr);
+    for (var i=0;i<len;i++){
+      s += CODE_CHARS.charAt(arr[i] ? arr[i] % CODE_CHARS.length : Math.floor(Math.random()*CODE_CHARS.length));
+    }
+    return s;
+  }
+  function shareUrl(){
+    return location.origin + location.pathname + '#' + roomCode;
+  }
+  var toastTimer = null;
+  function toast(msg){
+    var t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function(){ t.classList.remove('show'); }, 2600);
+  }
+  function copyLink(){
+    var url = shareUrl();
+    function fallback(){
+      var ta = document.createElement('textarea');
+      ta.value = url;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand('copy'); toast('邀请链接已复制'); }
+      catch(e){ toast('复制失败，请手动复制：' + url); }
+      document.body.removeChild(ta);
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(url).then(function(){ toast('邀请链接已复制'); }, fallback);
+    } else fallback();
+  }
+  function showError(title, desc){
+    document.getElementById('errTitle').textContent = title;
+    document.getElementById('errDesc').textContent = desc;
+    overlayError.hidden = false;
+  }
+
+  /* ---------- socket 联机层 ---------- */
+  function ensureIoClient(cb){
+    if (typeof io !== 'undefined'){ cb(); return; }
+    var s = document.createElement('script');
+    s.src = BACKEND_URL + '/socket.io/socket.io.js';
+    s.onload = cb;
+    s.onerror = function(){
+      showError('联机组件加载失败',
+        '无法从 ' + BACKEND_URL + '/socket.io/socket.io.js 加载 Socket.IO 客户端。请确认后端已启动，' +
+        '并检查 index.html 里的 window.GOMOKU_SERVER 是否配置正确。');
+    };
+    document.head.appendChild(s);
+  }
+
+  function bootstrap(){
+    var hash = location.hash.replace(/^#/, '').trim().toLowerCase();
+    if (/^[a-z0-9]{3,12}$/.test(hash)){
+      // 链接里带了房间号 -> 以房客身份加入
+      roomCode = hash;
+      isHost = false;
+    } else {
+      // 第一个打开页面的人 -> 建房，成为房主（seat 0）
+      roomCode = genCode(4);
+      history.replaceState(null, '', '#' + roomCode);
+      isHost = true;
+    }
+    elRoomCode.textContent = roomCode.toUpperCase();
+    document.getElementById('waitCode').textContent = roomCode.toUpperCase();
+    ensureIoClient(connectSocket);
+  }
+
+  function connectSocket(){
+    try {
+      socket = io(BACKEND_URL, {
+        transports: ['websocket', 'polling'],
+        reconnection: true,
+        reconnectionDelay: 800,
+        reconnectionDelayMax: 5000,
+        timeout: 15000
+      });
+    } catch (e){
+      showError('无法连接服务器', String(e));
+      return;
+    }
+
+    socket.on('connect', function(){
+      if (socketConnectedOnce){
+        // 首次之后的重连：由服务端 connectionStateRecovery 自动恢复会话
+        if (socket.recovered) toast('连接已恢复');
+        else showError('连接已中断', '与服务器的连接未能恢复，请刷新页面重新加入房间。');
+        return;
+      }
+      socketConnectedOnce = true;
+      if (isHost) hostCreateRoom(); else guestJoinRoom();
+    });
+
+    socket.on('connect_error', function(err){
+      if (socketConnectedOnce) return;
+      showError('无法连接服务器',
+        '连接 ' + BACKEND_URL + ' 失败：' + ((err && err.message) || '网络错误') + '\n' +
+        '· 页面部署在 Netlify 时，请把 index.html 里的 window.GOMOKU_SERVER 改成你的 Render 地址；\n' +
+        '· Render 免费实例冷启动约需 30~60 秒，稍等片刻刷新即可。');
+    });
+
+    socket.on('disconnect', function(reason){
+      if (reason === 'io client disconnect') return;
+      toast('与服务器连接中断，正在重连…');
+    });
+
+    socket.on('serverError', function(p){
+      showError('服务器错误', (p && p.message) || '未知错误');
+    });
+
+    /* ---- 房主侧事件 ---- */
+    socket.on('roomReady', function(){
+      showWaiting();
+      render();
+    });
+    socket.on('roomExists', function(){
+      // 极小概率撞号：换一个房间号重开
+      roomCode = genCode(4);
+      history.replaceState(null, '', '#' + roomCode);
+      elRoomCode.textContent = roomCode.toUpperCase();
+      document.getElementById('waitCode').textContent = roomCode.toUpperCase();
+      socket.emit('createRoom', { roomId: roomCode });
+    });
+    socket.on('guestJoined', function(p){
+      if (p && p.guestId) hostHandleJoin(p.guestId);
+    });
+    socket.on('guestLeft', function(p){
+      if (p && p.guestId) hostHandleClientClose(p.guestId);
+    });
+    socket.on('hostMessage', function(p){
+      if (!p || typeof p.from !== 'string') return;
+      var seat = guestSeatMap[p.from];
+      if (seat === undefined || seat === null) return;
+      var d = p.data;
+      if (!d || typeof d !== 'object') return;
+      if (d.type === 'move') hostApplyMove(seat, d.idx);
+      else if (d.type === 'restart') hostRequestedRestart(seat);
+    });
+    socket.on('hostOnline', function(){ toast('房主已重新连接'); });
+    socket.on('hostOffline', function(){ toast('房主连接中断，等待重连…'); });
+    socket.on('hostLeft', function(){
+      overlayWait.hidden = true;
+      showError('房间已解散', '房主已离开或关闭了页面，本局结束。你可以创建一个新房间继续玩。');
+    });
+
+    /* ---- 房客侧事件 ---- */
+    socket.on('roomNotFound', function(p){
+      showError('房间不存在',
+        (p && p.hostOffline)
+          ? '房主暂时掉线了，房间会保留约 1 分钟，请稍等后刷新页面重试。'
+          : '没有找到该房间，房主可能还未打开页面或已离开。请让第一位玩家先打开链接创建房间。');
+    });
+    socket.on('roomFull', function(){
+      showError('房间已满', '这个房间人数已满（最多 4 人）。可以自己创建一个新房间，或等有人离开后再试。');
+    });
+    socket.on('guestMessage', function(d){
+      if (!d || typeof d !== 'object') return;
+      if (d.type === 'welcome'){
+        joined = true;
+        mySeat = d.seat;
+        showWaiting();
+      } else if (d.type === 'full'){
+        var m = MODES[d.mode] || MODES.ffa3;
+        showError('房间已满', '这个房间是「' + m.label + '」且玩家已满。可以让房主在开局前切换更大的模式，或自己创建一个新房间。');
+      } else if (d.type === 'kicked'){
+        showError('已离开房间', '房主把模式切换成了人数更少的玩法，你被移出了本局。可以创建一个新房间继续玩。');
+      } else if (d.type === 'state'){
+        S = d.s;
+        if (joined && mySeat >= 0) onStateReceived();
+      }
+    });
+  }
+
+  function hostCreateRoom(){
+    isHost = true;
+    mySeat = 0;
+    joined = true;
+    S = freshState('ffa3');
+    socket.emit('createRoom', { roomId: roomCode });
+  }
+
+  function guestJoinRoom(){
+    isHost = false;
+    mySeat = -1;
+    joined = false;
+    socket.emit('joinRoom', { roomId: roomCode });
+  }
+
+  /** 房主：给新来的房客分配座位 */
+  function hostHandleJoin(guestId){
+    var cap = seatCount();
+    var seat = -1;
+    for (var i=1;i<cap;i++){
+      if (!S.joined[i] || !S.connected[i]) { seat = i; break; }
+    }
+    if (seat === -1){
+      // 座位不够：让服务器把他请出房间，并告诉他原因
+      socket.emit('kickGuest', { to: guestId, data: { type:'full', mode:S.mode } });
+      return;
+    }
+    // 他之前可能占着别的座位，先释放
+    var oldSeat = guestSeatMap[guestId];
+    if (oldSeat !== undefined && oldSeat !== seat && clientConns[oldSeat] === guestId){
+      clientConns[oldSeat] = null;
+    }
+    clientConns[seat] = guestId;
+    guestSeatMap[guestId] = seat;
+    S.joined[seat] = true;
+    S.connected[seat] = true;
+    sendToGuest(guestId, { type:'welcome', seat: seat });
+    broadcastState();
+    if (allHere() && !S.over && S.moves === 0){
+      overlayWait.hidden = true;
+      toast('玩家到齐，' + seatName(S.turn) + ' 先行！');
+    }
+  }
+
+  /** 房主：房客掉线 */
+  function hostHandleClientClose(guestId){
+    var seat = guestSeatMap[guestId];
+    if (seat === undefined || seat === null) return;
+    if (clientConns[seat] !== guestId) return;
+    clientConns[seat] = null;
+    delete guestSeatMap[guestId];
+    S.connected[seat] = false;
+    // 修复原版 bug：若正轮到该玩家，自动顺延，避免整局永久卡死
+    var advanced = false;
+    if (!S.over && S.turn === seat){
+      var nx = nextActive(seat);
+      if (nx !== seat){ S.turn = nx; advanced = true; }
+    }
+    broadcastState();
+    toast(seatName(seat) + ' 已断开连接' + (advanced ? '，轮到 ' + seatName(S.turn) : ''));
+  }
+
+  function sendToGuest(guestId, obj){
+    if (!socket || !guestId) return;
+    socket.emit('toGuest', { to: guestId, data: obj });
+  }
+
+  function broadcastState(){
+    if (!isHost || !S || !socket) return;
+    socket.emit('toGuests', { type:'state', s: plainState() });
+    render();
+    maybeShowResult();
+  }
+
+  function plainState(){
+    return {
+      mode:S.mode, board:S.board, turn:S.turn, ranks:S.ranks, winLines:S.winLines,
+      last:S.last, joined:S.joined, connected:S.connected, moves:S.moves, over:S.over
+    };
+  }
+
+  function sendToHost(obj){
+    if (socket) socket.emit('toHost', obj);
+  }
+
+  /* ---------- mode switching (host only, pre-game) ---------- */
+  function setMode(m){
+    if (!isHost || !S || S.moves > 0 || S.over) return;
+    if (!MODES[m] || S.mode === m) return;
+    S.mode = m;
+    var cap = seatCount();
+    for (var i=cap;i<4;i++){
+      if (S.joined[i]){
+        var kickedId = clientConns[i];
+        if (kickedId){
+          socket.emit('kickGuest', { to: kickedId, data: { type:'kicked' } });
+          delete guestSeatMap[kickedId];
+          clientConns[i] = null;
+        }
+        S.joined[i] = false;
+        S.connected[i] = false;
+      }
+    }
+    if (S.turn >= cap) S.turn = 0;
+    broadcastState();
+    showWaiting();
+    toast('已切换为「' + MODES[m].label + '」');
+  }
+
+  /* ---------- game logic (host authoritative) ---------- */
+  function nextActive(from){
+    var cap = seatCount();
+    for (var k=1;k<cap;k++){
+      var c = (from + k) % cap;
+      if (rankOf(c) !== -1) continue;   // 已锁定名次的不再出手
+      if (!S.connected[c]) continue;    // 掉线的直接跳过，避免整局卡死
+      return c;
+    }
+    return from;
+  }
+
+  function hostApplyMove(seat, idx){
+    if (!S || S.over) return;
+    if (rankOf(seat) !== -1) return;  // 已锁定名次的玩家不能再落子
+    if (seat !== S.turn) return;
+    if (!(idx >= 0 && idx < TOTAL) || S.board[idx] !== 0) return;
+    var val = stoneVal(seat);
+    S.board[idx] = val;
+    S.last = idx;
+    S.moves++;
+    var line = findWinLine(idx, val);
+    if (isTeam()){
+      if (line){
+        S.winLines.push({seat:seat, cells:line});
+        S.ranks = [seat, (seat + 2) % 4];
+        S.over = true;
+      } else if (S.moves >= TOTAL){
+        S.over = true;
+      } else {
+        S.turn = (seat + 1) % 4;
+      }
+    } else {
+      if (line){
+        S.winLines.push({seat:seat, cells:line});
+        S.ranks.push(seat);
+        if (S.ranks.length >= seatCount() - 1){
+          S.over = true;
+        } else {
+          S.turn = nextActive(seat);
+          broadcastState();
+          toast(seatName(seat) + ' 连成五子，锁定第 ' + S.ranks.length + ' 名！其余人继续对决');
+          return;
+        }
+      } else if (S.moves >= TOTAL){
+        S.over = true;
+      } else {
+        S.turn = nextActive(seat);
+      }
+    }
+    broadcastState();
+  }
+
+  function findWinLine(idx, val){
+    var x0 = idx % N, y0 = Math.floor(idx / N);
+    var dirs = [[1,0],[0,1],[1,1],[1,-1]];
+    for (var d=0; d<4; d++){
+      var dx = dirs[d][0], dy = dirs[d][1];
+      var cells = [idx];
+      var i;
+      for (i=1;i<5;i++){
+        var x=x0+dx*i, y=y0+dy*i;
+        if (x<0||x>=N||y<0||y>=N) break;
+        if (S.board[y*N+x] !== val) break;
+        cells.push(y*N+x);
+      }
+      for (i=1;i<5;i++){
+        var x2=x0-dx*i, y2=y0-dy*i;
+        if (x2<0||x2>=N||y2<0||y2>=N) break;
+        if (S.board[y2*N+x2] !== val) break;
+        cells.unshift(y2*N+x2);
+      }
+      if (cells.length >= 5) return cells;
+    }
+    return null;
+  }
+
+  function hostRestart(){
+    var keepJoined = S ? S.joined.slice() : [true,false,false,false];
+    var keepConn = S ? S.connected.slice() : [true,false,false,false];
+    var keepMode = S ? S.mode : 'ffa3';
+    S = freshState(keepMode);
+    S.joined = keepJoined;
+    S.connected = keepConn;
+    overlayResult.hidden = true;
+    broadcastState();
+    if (!allHere()) showWaiting();
+    else toast('新的一局开始，' + seatName(S.turn) + '先行！');
+  }
+
+  function requestMove(idx){
+    if (isHost){
+      hostApplyMove(0, idx);
+    } else {
+      if (!S || S.over) return;
+      if (rankOf(mySeat) !== -1){ toast('你已锁定名次，本局观战中'); return; }
+      if (mySeat !== S.turn){ toast('还没轮到你，等 ' + seatName(S.turn) + ' 落子'); return; }
+      if (S.board[idx] !== 0) return;
+      sendToHost({type:'move', idx: idx});
+    }
+  }
+  function requestRestart(){
+    if (isHost) hostRestart();
+    else { sendToHost({type:'restart'}); toast('已请求房主开启新一局'); }
+  }
+  /** 房主：收到房客的重开请求 */
+  function hostRequestedRestart(seat){
+    toast(seatName(seat) + ' 想再来一局，点「再来一局」即可开始');
+  }
+
+  /* ---------- client state receive ---------- */
+  var resultShownFor = -2;
+  function onStateReceived(){
+    render();
+    maybeShowResult();
+  }
+
+  function maybeShowResult(){
+    if (!S) return;
+    if (!S.over){
+      resultShownFor = -2;
+      overlayResult.hidden = true;
+      if (allHere()) overlayWait.hidden = true;
+    } else if (resultShownFor !== S.moves){
+      resultShownFor = S.moves;
+      showResult();
+    }
+  }
+
+  /* ---------- waiting overlay ---------- */
+  function showWaiting(){
+    overlayWait.hidden = false;
+    document.getElementById('waitTitle').textContent =
+      isHost ? '等待玩家加入' : '已加入房间';
+    document.getElementById('waitDesc').textContent =
+      isHost ? '选择模式，把链接发给朋友，玩家到齐自动开局' : '等待其他玩家加入，玩家到齐自动开局';
+    renderModeArea();
+    renderWaitSeats();
+  }
+  function renderModeArea(){
+    var area = document.getElementById('modeArea');
+    area.innerHTML = '';
+    var mode = S ? S.mode : 'ffa3';
+    if (!isHost){
+      var lab = document.createElement('div');
+      lab.className = 'mode-label';
+      lab.textContent = '当前模式：' + MODES[mode].label + '（由房主设置）';
+      area.appendChild(lab);
+      return;
+    }
+    var wrap = document.createElement('div');
+    wrap.className = 'modes';
+    var keys = ['ffa3','ffa4','team4'];
+    for (var i=0;i<keys.length;i++){
+      (function(k){
+        var b = document.createElement('button');
+        b.className = 'mode-btn' + (mode === k ? ' sel' : '');
+        b.textContent = MODES[k].label;
+        b.addEventListener('click', function(){ setMode(k); });
+        wrap.appendChild(b);
+      })(keys[i]);
+    }
+    area.appendChild(wrap);
+  }
+  function renderWaitSeats(){
+    var wrap = document.getElementById('waitSeats');
+    wrap.innerHTML = '';
+    var cap = S ? seatCount() : 3;
+    var joined = S ? S.joined : [true,false,false,false];
+    for (var i=0;i<cap;i++){
+      var d = document.createElement('div');
+      d.className = 'seat ' + (joined[i] ? 'joined' : 'empty');
+      var dot = document.createElement('i');
+      if (joined[i] && S) dot.className = seatColor(i).key;
+      var label = document.createElement('span');
+      label.textContent = joined[i] && S ? (seatName(i) + (i===mySeat ? '（我）' : '')) : '空位';
+      d.appendChild(dot);
+      d.appendChild(label);
+      wrap.appendChild(d);
+    }
+  }
+
+  /* ---------- result overlay ---------- */
+  var PLACE_NAMES = ['第 1 名','第 2 名','第 3 名','第 4 名'];
+  function stoneBg(colorKey){
+    if (colorKey === 'black') return 'radial-gradient(circle at 34% 30%, #5a5d66, #26282e 60%)';
+    if (colorKey === 'white') return 'radial-gradient(circle at 34% 30%, #ffffff, #d9d9d4 75%)';
+    if (colorKey === 'red') return 'radial-gradient(circle at 34% 30%, #f0796c, #b33026 75%)';
+    return 'radial-gradient(circle at 34% 30%, #7fa3ee, #274f9e 75%)';
+  }
+  function showResult(){
+    var title = document.getElementById('resultTitle');
+    var desc = document.getElementById('resultDesc');
+    var list = document.getElementById('resultList');
+    list.innerHTML = '';
+    if (isTeam()){
+      var winTeam = S.ranks.length ? S.ranks[0] % 2 : -1;
+      if (winTeam === -1){
+        title.textContent = '平局！';
+        desc.textContent = '棋盘已下满，两队握手言和。';
+      } else {
+        title.textContent = (winTeam === 0 ? '黑队' : '白队') + '获胜！';
+        var mates = S.ranks.map(function(s){ return seatName(s); });
+        desc.textContent = '恭喜 ' + mates.join('、') + ' 连成五子。';
+      }
+    } else {
+      title.textContent = '对局结束';
+      var champName = S.ranks.length ? seatName(S.ranks[0]) : '';
+      desc.textContent = S.ranks.length ? champName + ' 夺得本局第一！' : '棋盘已下满，本局平局。';
+      var cap = seatCount();
+      var rest = [];
+      for (var i=0;i<cap;i++){
+        if (S.joined[i] && rankOf(i) === -1) rest.push(i);
+      }
+      var rows = S.ranks.slice();
+      for (var r=0;r<rows.length;r++){
+        list.appendChild(makeRankItem(rows[r], PLACE_NAMES[r]));
+      }
+      if (rest.length){
+        var tieLabel = PLACE_NAMES[rows.length] + (rest.length > 1 ? '（并列）' : '');
+        for (var t=0;t<rest.length;t++){
+          list.appendChild(makeRankItem(rest[t], tieLabel));
+        }
+      }
+    }
+    overlayResult.hidden = false;
+    overlayWait.hidden = true;
+    btnRestart.disabled = false;
+  }
+  function makeRankItem(seat, place){
+    var item = document.createElement('div');
+    item.className = 'rank-item';
+    var dot = document.createElement('span');
+    dot.className = 'dot';
+    dot.style.background = stoneBg(seatColor(seat).key);
+    var who = document.createElement('span');
+    who.className = 'who';
+    who.textContent = seatName(seat) + (seat === mySeat ? '（我）' : '');
+    var pl = document.createElement('span');
+    pl.className = 'place';
+    pl.textContent = place;
+    item.appendChild(dot);
+    item.appendChild(who);
+    item.appendChild(pl);
+    return item;
+  }
+
+  /* ---------- rendering ---------- */
+  function render(){
+    renderPlayers();
+    renderStatus();
+    if (!overlayWait.hidden){
+      renderModeArea();
+      renderWaitSeats();
+    }
+    drawBoard();
+    if (isHost) btnRestart.disabled = false;
+    else btnRestart.disabled = !(S && allHere());
+    elPlayerCards.style.gridTemplateColumns = 'repeat(' + (S ? seatCount() : 3) + ',1fr)';
+  }
+
+  function renderPlayers(){
+    elPlayerCards.innerHTML = '';
+    var cap = S ? seatCount() : 3;
+    for (var i=0;i<cap;i++){
+      var joined = S ? S.joined[i] : (i===0);
+      var connected = S ? S.connected[i] : (i===0);
+      var rk = S ? rankOf(i) : -1;
+      var isTurn = S && !S.over && S.turn === i && joined && rk === -1;
+      var card = document.createElement('div');
+      card.className = 'pcard' + (isTurn ? ' active' : '') + (!connected ? ' offline' : '') + (rk !== -1 ? ' ranked' : '');
+      if (rk !== -1){
+        var badge = document.createElement('span');
+        badge.className = 'rank';
+        badge.textContent = isTeam() ? '胜' : (rk + 1) + '名';
+        card.appendChild(badge);
+      }
+      var stone = document.createElement('div');
+      stone.className = 'stone ' + (S ? seatColor(i).key : COLORS[i].key);
+      var name = document.createElement('div');
+      name.className = 'pname';
+      name.textContent = (S ? seatName(i) : COLORS[i].name) + (i === mySeat ? '（我）' : '');
+      var tag = document.createElement('div');
+      tag.className = 'ptag';
+      if (!joined) tag.textContent = '等待加入';
+      else if (!connected) tag.textContent = '已断开';
+      else if (rk !== -1) tag.textContent = isTeam() ? '获胜队伍' : '已锁定名次';
+      else if (isTurn) tag.textContent = i === mySeat ? '轮到你落子' : '落子中';
+      else tag.textContent = '等待中';
+      card.appendChild(stone);
+      card.appendChild(name);
+      card.appendChild(tag);
+      elPlayerCards.appendChild(card);
+    }
+  }
+
+  function renderStatus(){
+    if (!S){
+      elStatus.textContent = '正在连接信令服务…';
+      return;
+    }
+    if (S.over){
+      if (isTeam()){
+        elStatus.textContent = S.ranks.length
+          ? (S.ranks[0] % 2 === 0 ? '黑队获胜' : '白队获胜')
+          : '本局平局';
+      } else {
+        elStatus.textContent = S.ranks.length
+          ? seatName(S.ranks[0]) + ' 第一，对局结束'
+          : '本局平局';
+      }
+      return;
+    }
+    if (!allHere()){
+      elStatus.textContent = '等待玩家加入（' + joinedCount() + '/' + seatCount() + '），分享链接邀请朋友 · ' + MODES[S.mode].label;
+      return;
+    }
+    var prefix = '';
+    if (!isTeam() && S.ranks.length){
+      var done = S.ranks.map(function(s){ return seatName(s) + '第' + (rankOf(s)+1) + '名'; });
+      prefix = done.join('、') + '已锁定 · ';
+    }
+    var msg = prefix + '轮到 ' + seatName(S.turn) + ' 落子';
+    if (S.turn === mySeat) msg = prefix + '轮到你了，点击棋盘落子';
+    var disc = [];
+    for (var i=0;i<seatCount();i++) if (S.joined[i] && !S.connected[i]) disc.push(seatName(i));
+    if (disc.length) msg += '（' + disc.join('、') + ' 已断开）';
+    elStatus.textContent = msg;
+  }
+
+  /* SECTION: canvas-draw */
+  function drawBoard(){
+    var dpr = window.devicePixelRatio || 1;
+    var cssSize = canvas.clientWidth || canvas.parentNode.clientWidth - 20 || 320;
+    if (cssSize < 50) cssSize = 320;
+    if (canvas.width !== Math.round(cssSize*dpr)){
+      canvas.width = Math.round(cssSize*dpr);
+      canvas.height = Math.round(cssSize*dpr);
+      canvas.style.height = cssSize + 'px';
+    }
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    var size = cssSize;
+    cellPx = size / (N + 1);
+
+    var g = ctx.createLinearGradient(0,0,size,size);
+    g.addColorStop(0,'#eed3a0');
+    g.addColorStop(0.5,'#e3c189');
+    g.addColorStop(1,'#d8b277');
+    ctx.fillStyle = g;
+    ctx.fillRect(0,0,size,size);
+
+    ctx.strokeStyle = 'rgba(105,72,25,.55)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (var i=0;i<N;i++){
+      var p = (i+1)*cellPx;
+      ctx.moveTo(cellPx, p); ctx.lineTo(size-cellPx, p);
+      ctx.moveTo(p, cellPx); ctx.lineTo(p, size-cellPx);
+    }
+    ctx.stroke();
+
+    var stars = [[3,3],[3,11],[11,3],[11,11],[7,7]];
+    ctx.fillStyle = 'rgba(105,72,25,.7)';
+    for (var s=0;s<stars.length;s++){
+      ctx.beginPath();
+      ctx.arc((stars[s][0]+1)*cellPx, (stars[s][1]+1)*cellPx, Math.max(2.5, cellPx*0.1), 0, Math.PI*2);
+      ctx.fill();
+    }
+
+    if (!S) return;
+    var winSet = {};
+    for (var w=0; w<S.winLines.length; w++){
+      var cells = S.winLines[w].cells;
+      for (var c=0;c<cells.length;c++) winSet[cells[c]] = true;
+    }
+
+    for (var idx=0; idx<TOTAL; idx++){
+      var v = S.board[idx];
+      if (!v) continue;
+      var x = (idx % N + 1) * cellPx;
+      var y = (Math.floor(idx / N) + 1) * cellPx;
+      drawStone(x, y, v, idx === S.last, !!winSet[idx]);
+    }
+  }
+
+  function drawStone(x, y, v, isLast, isWin){
+    var r = cellPx * 0.42;
+    ctx.save();
+    ctx.shadowColor = 'rgba(60,40,10,.35)';
+    ctx.shadowBlur = r*0.4;
+    ctx.shadowOffsetY = r*0.15;
+    var g = ctx.createRadialGradient(x-r*0.35, y-r*0.4, r*0.15, x, y, r);
+    if (v === 1){ g.addColorStop(0,'#6a6e79'); g.addColorStop(0.55,'#2b2d34'); g.addColorStop(1,'#14151a'); }
+    else if (v === 2){ g.addColorStop(0,'#ffffff'); g.addColorStop(0.7,'#e9e8e2'); g.addColorStop(1,'#cfcdc2'); }
+    else if (v === 3){ g.addColorStop(0,'#f4877a'); g.addColorStop(0.55,'#d84b3f'); g.addColorStop(1,'#9e2b21'); }
+    else { g.addColorStop(0,'#7fa3ee'); g.addColorStop(0.55,'#3b6fd4'); g.addColorStop(1,'#274f9e'); }
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+    if (isWin){
+      ctx.strokeStyle = '#c9a24b';
+      ctx.lineWidth = Math.max(2, r*0.18);
+      ctx.beginPath();
+      ctx.arc(x, y, r*0.82, 0, Math.PI*2);
+      ctx.stroke();
+    } else if (isLast){
+      ctx.fillStyle = v === 2 ? '#b0793a' : 'rgba(255,255,255,.85)';
+      ctx.beginPath();
+      ctx.arc(x, y, Math.max(2, r*0.18), 0, Math.PI*2);
+      ctx.fill();
+    }
+  }
+
+  /* ---------- input ---------- */
+  function pointToIndex(clientX, clientY){
+    var rect = canvas.getBoundingClientRect();
+    var x = clientX - rect.left;
+    var y = clientY - rect.top;
+    var gx = Math.round(x / cellPx) - 1;
+    var gy = Math.round(y / cellPx) - 1;
+    if (gx < 0 || gx >= N || gy < 0 || gy >= N) return -1;
+    var cx = (gx+1)*cellPx, cy = (gy+1)*cellPx;
+    if (Math.abs(x-cx) > cellPx*0.48 || Math.abs(y-cy) > cellPx*0.48) return -1;
+    return gy*N + gx;
+  }
+  canvas.addEventListener('click', function(e){
+    if (!S || S.over) return;
+    if (!allHere()){ toast('等玩家到齐后开局'); return; }
+    if (rankOf(mySeat) !== -1){ toast('你已锁定名次，本局观战中'); return; }
+    if (mySeat !== S.turn){ toast('还没轮到你'); return; }
+    var idx = pointToIndex(e.clientX, e.clientY);
+    if (idx < 0) return;
+    if (S.board[idx] !== 0){ toast('这个位置已经有棋子了'); return; }
+    requestMove(idx);
+  });
+
+  /* ---------- buttons ---------- */
+  document.getElementById('btnShare').addEventListener('click', copyLink);
+  document.getElementById('btnShare2').addEventListener('click', copyLink);
+  btnRestart.addEventListener('click', requestRestart);
+  document.getElementById('btnRestart2').addEventListener('click', requestRestart);
+  function newRoom(){
+    if (socket) socket.emit('leaveRoom');
+    location.hash = '';
+    location.reload();
+  }
+  document.getElementById('btnNewRoom').addEventListener('click', newRoom);
+  document.getElementById('btnNewRoom2').addEventListener('click', newRoom);
+
+  var resizeTimer = null;
+  window.addEventListener('resize', function(){
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(drawBoard, 80);
+  });
+
+  /* ---------- keyboard support ---------- */
+  var cursor = {x:7, y:7};
+  window.addEventListener('keydown', function(e){
+    if (!S || S.over || mySeat !== S.turn) return;
+    var moved = true;
+    if (e.key === 'ArrowLeft') cursor.x = Math.max(0, cursor.x-1);
+    else if (e.key === 'ArrowRight') cursor.x = Math.min(N-1, cursor.x+1);
+    else if (e.key === 'ArrowUp') cursor.y = Math.max(0, cursor.y-1);
+    else if (e.key === 'ArrowDown') cursor.y = Math.min(N-1, cursor.y+1);
+    else if (e.key === 'Enter' || e.key === ' '){
+      requestMove(cursor.y*N + cursor.x);
+      return;
+    } else moved = false;
+    if (moved){
+      e.preventDefault();
+      drawBoard();
+      var kx = (cursor.x+1)*cellPx, ky = (cursor.y+1)*cellPx;
+      ctx.strokeStyle = 'rgba(176,121,58,.9)';
+      ctx.lineWidth = 2;
+      ctx.strokeRect(kx-cellPx*0.4, ky-cellPx*0.4, cellPx*0.8, cellPx*0.8);
+    }
+  });
+
+  window.addEventListener('beforeunload', function(){
+    if (socket) socket.emit('leaveRoom');
+  });
+
+  /* ---------- boot ---------- */
+  if (document.readyState === 'loading'){
+    document.addEventListener('DOMContentLoaded', bootstrap);
+  } else {
+    bootstrap();
+  }
+})();
+</script>
+</body>
+</html>

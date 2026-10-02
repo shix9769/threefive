@@ -1,0 +1,22 @@
+{
+  "name": "threefive-gomoku-server",
+  "version": "2.0.0",
+  "private": true,
+  "description": "多人五子棋 Socket.IO 中继服务器（三人/四人自由战、2v2 组队）",
+  "main": "server.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node test/e2e.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.4"
+  }
+}

@@ -117,6 +117,14 @@ git push -u origin main        # 或 master，以你本地分支为准
 > 免费实例空闲约 15 分钟会休眠，下次访问有约 30~60 秒冷启动，属正常现象。
 > 首次打开时如果报「无法连接服务器」，**等 1 分钟再刷新**即可。
 
+> **免绑卡的替代后端平台**：Render 免费版需要绑卡做验证。若不想绑卡，可改用以下任一平台，部署方式几乎相同（都支持 GitHub 关联 + WebSocket；仓库已带 `Dockerfile`，会自动构建）：
+>
+> - **Zeabur**（推荐，中文界面、国内访问快）：[zeabur.com](https://zeabur.com) → 用 GitHub 登录 → 新建项目 → 关联本仓库 → 部署，得到 `https://xxx.zeabur.app`。
+> - **Koyeb**：[koyeb.com](https://www.koyeb.com) → Create Web Service → 关联本仓库 → 选 **Free** 实例 → 健康检查把协议改成 **HTTP**、路径填 `/healthz` → Deploy，得到 `https://xxx.koyeb.app`。
+> - **Glitch**（免卡但会休眠、国内访问不稳，仅兜底）：[glitch.com](https://glitch.com) → New Project → Import from GitHub → 选本仓库。
+>
+> 无论用哪个，拿到后端地址后同样填进下面第 4 步的 `window.GOMOKU_SERVER` 即可。
+
 ### 第 3 步：Netlify 部署前端
 
 1. 打开 <https://app.netlify.com>，用 GitHub 登录。

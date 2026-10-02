@@ -140,6 +140,24 @@ body{
 .mode-btn.sel{border-color:var(--accent);background:var(--accent);color:#fff;font-weight:600}
 .mode-label{font-size:13px;color:var(--ink-soft);margin-bottom:12px}
 
+/* SECTION: color-picker */
+.colors{display:flex;gap:10px;justify-content:center;margin:2px 0 14px;flex-wrap:wrap}
+.color-swatch{
+  width:40px;height:40px;border-radius:50%;cursor:pointer;position:relative;
+  border:1px solid rgba(0,0,0,.12);transition:transform .12s ease,box-shadow .15s,opacity .15s;
+}
+.color-swatch.black{background:radial-gradient(circle at 34% 30%,#5a5d66,#26282e 60%)}
+.color-swatch.white{background:radial-gradient(circle at 34% 30%,#ffffff,#d9d9d4 75%)}
+.color-swatch.red{background:radial-gradient(circle at 34% 30%,#f0796c,#b33026 75%)}
+.color-swatch.blue{background:radial-gradient(circle at 34% 30%,#7fa3ee,#274f9e 75%)}
+.color-swatch.sel{box-shadow:0 0 0 3px var(--accent),0 0 0 5px rgba(176,121,58,.25);transform:scale(1.08)}
+.color-swatch.taken{opacity:.3;cursor:not-allowed}
+.color-swatch .check{
+  position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+  color:#fff;font-size:17px;font-weight:700;text-shadow:0 1px 2px rgba(0,0,0,.55);
+}
+.color-swatch.white .check{color:#6b6048;text-shadow:none}
+
 /* SECTION: result-list */
 .rank-list{display:flex;flex-direction:column;gap:8px;margin:14px 0 18px;text-align:left}
 .rank-item{display:flex;align-items:center;gap:10px;background:#f8f3e8;border-radius:12px;padding:9px 12px;font-size:14px}
@@ -203,6 +221,7 @@ body{
     <p id="waitDesc">把链接发给朋友，玩家到齐自动开局</p>
     <div class="big-code" id="waitCode"></div>
     <div id="modeArea"></div>
+    <div id="colorArea"></div>
     <div class="seats" id="waitSeats"></div>
     <div class="actions">
       <button class="btn primary" id="btnShare2">复制邀请链接</button>
@@ -240,7 +259,7 @@ body{
 <script>
 (function(){
   'use strict';
-  var N = 15, TOTAL = N * N;
+  var N = 25, TOTAL = N * N;
   var COLORS = [
     {key:'black', name:'黑方'},
     {key:'white', name:'白方'},
@@ -280,8 +299,9 @@ body{
   var cellPx = 24;
 
   function freshState(mode){
+    var m = mode || 'ffa3';
     return {
-      mode: mode || 'ffa3',
+      mode: m,
       board: new Array(TOTAL).fill(0),
       turn: 0,
       ranks: [],        // 按名次先后记录的座位号（自由战逐次锁定；组队为胜方两人）
@@ -289,6 +309,7 @@ body{
       last: -1,
       joined: [true,false,false,false],
       connected: [true,false,false,false],
+      colors: MODES[m].team ? [0,1,0,1] : [0,1,2,3],   // 每座位的棋子颜色（0黑/1白/2红/3蓝）
       moves: 0,
       over: false
     };
@@ -297,11 +318,28 @@ body{
   /* ---------- mode helpers ---------- */
   function seatCount(){ return MODES[S.mode].seats; }
   function isTeam(){ return MODES[S.mode].team; }
-  function stoneVal(seat){ return isTeam() ? (seat % 2) + 1 : seat + 1; }
-  function seatColor(seat){ return isTeam() ? COLORS[seat % 2] : COLORS[seat]; }
+  // 座位当前使用的颜色索引（0黑/1白/2红/3蓝）；老数据缺失时回退到按座位
+  function colorOf(seat){
+    if (S && S.colors && S.colors[seat] != null) return S.colors[seat];
+    return isTeam() ? (seat % 2) : seat;
+  }
+  function stoneVal(seat){ return isTeam() ? (colorOf(seat) % 2) + 1 : colorOf(seat) + 1; }
+  function seatColor(seat){ return COLORS[isTeam() ? (colorOf(seat) % 2) : colorOf(seat)]; }
   function seatName(seat){
-    if (!isTeam()) return COLORS[seat].name;
-    return (seat % 2 === 0 ? '黑队' : '白队') + (seat < 2 ? '·甲' : '·乙');
+    if (!isTeam()) return COLORS[colorOf(seat)].name;
+    var team = colorOf(seat) % 2;
+    var label = team === 0 ? '黑队' : '白队';
+    var order = 0;
+    for (var i=0;i<seat;i++) if (colorOf(i) % 2 === team) order++;
+    return label + (order === 0 ? '·甲' : '·乙');
+  }
+  // 组队模式下，与 seat 同队的另一个座位
+  function teamMate(seat){
+    var team = colorOf(seat) % 2;
+    for (var i=0;i<4;i++){
+      if (i !== seat && colorOf(i) % 2 === team) return i;
+    }
+    return -1;
   }
   function rankOf(seat){ return S.ranks.indexOf(seat); }
   function joinedCount(){
@@ -310,6 +348,34 @@ body{
     return c;
   }
   function allHere(){ return joinedCount() === seatCount(); }
+
+  /* ---------- color selection helpers ---------- */
+  // 当前模式下可选的颜色集合（组队只有黑/白）
+  function colorChoices(){
+    return isTeam() ? [0, 1] : [0, 1, 2, 3];
+  }
+  // 颜色 c 对 seat 而言是否可选（自由战每色唯一；组队每色最多 2 人）
+  function colorAvailable(c, seat){
+    var limit = isTeam() ? 2 : 1;
+    var used = 0;
+    for (var i=0;i<4;i++){
+      if (i === seat) continue;
+      if (S.joined[i] && S.colors[i] === c) used++;
+    }
+    return used < limit;
+  }
+  // 给 seat 分配一个当前可选的颜色（新玩家进房时兜底）
+  function firstAvailableColor(seat){
+    var choices = colorChoices();
+    for (var i=0;i<choices.length;i++){
+      if (colorAvailable(choices[i], seat)) return choices[i];
+    }
+    return isTeam() ? (seat % 2) : seat;
+  }
+  // 切换模式后，按当前模式重置为默认配色
+  function assignDefaultColors(){
+    S.colors = isTeam() ? [0,1,0,1] : [0,1,2,3];
+  }
 
   /* ---------- utils ---------- */
   function genCode(len){
@@ -455,6 +521,7 @@ body{
       if (!d || typeof d !== 'object') return;
       if (d.type === 'move') hostApplyMove(seat, d.idx);
       else if (d.type === 'restart') hostRequestedRestart(seat);
+      else if (d.type === 'color') hostApplyColor(seat, d.color);
     });
     socket.on('hostOnline', function(){ toast('房主已重新连接'); });
     socket.on('hostOffline', function(){ toast('房主连接中断，等待重连…'); });
@@ -484,6 +551,8 @@ body{
         showError('房间已满', '这个房间是「' + m.label + '」且玩家已满。可以让房主在开局前切换更大的模式，或自己创建一个新房间。');
       } else if (d.type === 'kicked'){
         showError('已离开房间', '房主把模式切换成了人数更少的玩法，你被移出了本局。可以创建一个新房间继续玩。');
+      } else if (d.type === 'colorRejected'){
+        toast('这个颜色已被占用，请换一个');
       } else if (d.type === 'state'){
         S = d.s;
         if (joined && mySeat >= 0) onStateReceived();
@@ -527,6 +596,7 @@ body{
     guestSeatMap[guestId] = seat;
     S.joined[seat] = true;
     S.connected[seat] = true;
+    S.colors[seat] = firstAvailableColor(seat);   // 先分配一个可用颜色，可自行修改
     sendToGuest(guestId, { type:'welcome', seat: seat });
     broadcastState();
     if (allHere() && !S.over && S.moves === 0){
@@ -568,7 +638,8 @@ body{
   function plainState(){
     return {
       mode:S.mode, board:S.board, turn:S.turn, ranks:S.ranks, winLines:S.winLines,
-      last:S.last, joined:S.joined, connected:S.connected, moves:S.moves, over:S.over
+      last:S.last, joined:S.joined, connected:S.connected, colors:S.colors,
+      moves:S.moves, over:S.over
     };
   }
 
@@ -595,6 +666,7 @@ body{
       }
     }
     if (S.turn >= cap) S.turn = 0;
+    assignDefaultColors();   // 换模式后重置配色
     broadcastState();
     showWaiting();
     toast('已切换为「' + MODES[m].label + '」');
@@ -625,12 +697,12 @@ body{
     if (isTeam()){
       if (line){
         S.winLines.push({seat:seat, cells:line});
-        S.ranks = [seat, (seat + 2) % 4];
+        S.ranks = [seat, teamMate(seat)];   // 队友 = 同色座位
         S.over = true;
       } else if (S.moves >= TOTAL){
         S.over = true;
       } else {
-        S.turn = (seat + 1) % 4;
+        S.turn = nextActive(seat);          // 掉线顺延，与自由战一致
       }
     } else {
       if (line){
@@ -650,6 +722,23 @@ body{
         S.turn = nextActive(seat);
       }
     }
+    broadcastState();
+  }
+
+  /** 房主：处理改色请求（仅开局前有效） */
+  function hostApplyColor(seat, color){
+    if (!isHost || !S) return;
+    if (S.moves > 0 || S.over) return;              // 开局后不能改
+    if (typeof color !== 'number' || color < 0 || color > 3) return;
+    if (!S.joined[seat] || !S.connected[seat]) return;
+    if (isTeam() && color !== 0 && color !== 1) return;  // 组队只能黑/白
+    if (S.colors[seat] === color) return;
+    if (!colorAvailable(color, seat)){
+      if (seat === 0) toast('这个颜色已被占用');
+      else sendToGuest(clientConns[seat], { type:'colorRejected' });
+      return;
+    }
+    S.colors[seat] = color;
     broadcastState();
   }
 
@@ -681,9 +770,11 @@ body{
     var keepJoined = S ? S.joined.slice() : [true,false,false,false];
     var keepConn = S ? S.connected.slice() : [true,false,false,false];
     var keepMode = S ? S.mode : 'ffa3';
+    var keepColors = S ? S.colors.slice() : null;
     S = freshState(keepMode);
     S.joined = keepJoined;
     S.connected = keepConn;
+    if (keepColors) S.colors = keepColors;
     overlayResult.hidden = true;
     broadcastState();
     if (!allHere()) showWaiting();
@@ -700,6 +791,10 @@ body{
       if (S.board[idx] !== 0) return;
       sendToHost({type:'move', idx: idx});
     }
+  }
+  function requestColor(color){
+    if (isHost) hostApplyColor(0, color);
+    else sendToHost({ type:'color', color: color });
   }
   function requestRestart(){
     if (isHost) hostRestart();
@@ -735,8 +830,9 @@ body{
     document.getElementById('waitTitle').textContent =
       isHost ? '等待玩家加入' : '已加入房间';
     document.getElementById('waitDesc').textContent =
-      isHost ? '选择模式，把链接发给朋友，玩家到齐自动开局' : '等待其他玩家加入，玩家到齐自动开局';
+      isHost ? '选择模式和棋子颜色，把链接发给朋友，玩家到齐自动开局' : '等待其他玩家加入，可先选棋子颜色';
     renderModeArea();
+    renderColorArea();
     renderWaitSeats();
   }
   function renderModeArea(){
@@ -781,6 +877,42 @@ body{
       wrap.appendChild(d);
     }
   }
+  function renderColorArea(){
+    var area = document.getElementById('colorArea');
+    area.innerHTML = '';
+    if (!S || S.moves > 0 || S.over) return;   // 开局后不再显示
+    if (mySeat < 0 || !S.joined[mySeat]) return;
+    var label = document.createElement('div');
+    label.className = 'mode-label';
+    label.textContent = isTeam() ? '选择你的队伍（同色为队友）' : '选择你的棋子颜色';
+    area.appendChild(label);
+
+    var wrap = document.createElement('div');
+    wrap.className = 'colors';
+    var choices = colorChoices();
+    var myColor = colorOf(mySeat);
+    for (var i=0;i<choices.length;i++){
+      (function(c){
+        var taken = !colorAvailable(c, mySeat) && c !== myColor;
+        var b = document.createElement('div');
+        b.className = 'color-swatch ' + COLORS[c].key + (c === myColor ? ' sel' : '') + (taken ? ' taken' : '');
+        if (c === myColor){
+          var chk = document.createElement('span');
+          chk.className = 'check';
+          chk.textContent = '✓';
+          b.appendChild(chk);
+        }
+        b.title = COLORS[c].name + (taken ? '（已被占用）' : '');
+        b.addEventListener('click', function(){
+          if (c === myColor) return;
+          if (taken){ toast(COLORS[c].name + '已被占用'); return; }
+          requestColor(c);
+        });
+        wrap.appendChild(b);
+      })(choices[i]);
+    }
+    area.appendChild(wrap);
+  }
 
   /* ---------- result overlay ---------- */
   var PLACE_NAMES = ['第 1 名','第 2 名','第 3 名','第 4 名'];
@@ -796,7 +928,7 @@ body{
     var list = document.getElementById('resultList');
     list.innerHTML = '';
     if (isTeam()){
-      var winTeam = S.ranks.length ? S.ranks[0] % 2 : -1;
+      var winTeam = S.ranks.length ? colorOf(S.ranks[0]) % 2 : -1;
       if (winTeam === -1){
         title.textContent = '平局！';
         desc.textContent = '棋盘已下满，两队握手言和。';
@@ -853,6 +985,7 @@ body{
     renderStatus();
     if (!overlayWait.hidden){
       renderModeArea();
+      renderColorArea();
       renderWaitSeats();
     }
     drawBoard();
@@ -878,10 +1011,10 @@ body{
         card.appendChild(badge);
       }
       var stone = document.createElement('div');
-      stone.className = 'stone ' + (S ? seatColor(i).key : COLORS[i].key);
+      stone.className = 'stone ' + (S && S.joined[i] ? seatColor(i).key : COLORS[i].key);
       var name = document.createElement('div');
       name.className = 'pname';
-      name.textContent = (S ? seatName(i) : COLORS[i].name) + (i === mySeat ? '（我）' : '');
+      name.textContent = (S && S.joined[i] ? seatName(i) : COLORS[i].name) + (i === mySeat ? '（我）' : '');
       var tag = document.createElement('div');
       tag.className = 'ptag';
       if (!joined) tag.textContent = '等待加入';
@@ -904,7 +1037,7 @@ body{
     if (S.over){
       if (isTeam()){
         elStatus.textContent = S.ranks.length
-          ? (S.ranks[0] % 2 === 0 ? '黑队获胜' : '白队获胜')
+          ? (colorOf(S.ranks[0]) % 2 === 0 ? '黑队获胜' : '白队获胜')
           : '本局平局';
       } else {
         elStatus.textContent = S.ranks.length
@@ -961,7 +1094,13 @@ body{
     }
     ctx.stroke();
 
-    var stars = [[3,3],[3,11],[11,3],[11,11],[7,7]];
+    var starPos = [3, Math.floor(N/2), N-4];
+    var stars = [];
+    for (var sy=0;sy<starPos.length;sy++){
+      for (var sx=0;sx<starPos.length;sx++){
+        stars.push([starPos[sx], starPos[sy]]);
+      }
+    }
     ctx.fillStyle = 'rgba(105,72,25,.7)';
     for (var s=0;s<stars.length;s++){
       ctx.beginPath();
@@ -1058,7 +1197,7 @@ body{
   });
 
   /* ---------- keyboard support ---------- */
-  var cursor = {x:7, y:7};
+  var cursor = {x:Math.floor(N/2), y:Math.floor(N/2)};
   window.addEventListener('keydown', function(e){
     if (!S || S.over || mySeat !== S.turn) return;
     var moved = true;

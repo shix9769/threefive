@@ -21,6 +21,11 @@ const GRACE_MS = 4000;
 const EXTERNAL = process.env.E2E_BASE || '';
 const BASE = EXTERNAL ? EXTERNAL.replace(/^http/, 'ws') : `ws://127.0.0.1:${PORT}`;
 const HEALTH_URL = EXTERNAL || `http://127.0.0.1:${PORT}`;
+// 每次运行使用唯一房间号，避免复用线上后端时被上一轮 90 秒宽限状态干扰
+const RUN = Math.random().toString(36).slice(2, 6);
+const ROOM_A = 'ra' + RUN;
+const ROOM_B = 'rb' + RUN;
+const ROOM_X = 'rx' + RUN;
 
 let passed = 0;
 let failed = 0;
@@ -64,7 +69,7 @@ function send(ws, obj) {
   ws.send(JSON.stringify(obj));
 }
 
-function waitFor(ws, pred, timeout = 4000) {
+function waitFor(ws, pred, timeout = 4000, what = '消息') {
   // 队列里可能已经有更早到达的匹配消息，先消化它
   for (let i = 0; i < ws.__queue.length; i++) {
     if (!pred || pred(ws.__queue[i])) {
@@ -78,7 +83,7 @@ function waitFor(ws, pred, timeout = 4000) {
       timer: setTimeout(() => {
         const i = ws.__waiters.indexOf(w);
         if (i >= 0) ws.__waiters.splice(i, 1);
-        reject(new Error(ws.__name + ' 等待消息超时'));
+        reject(new Error(ws.__name + ' 等待「' + what + '」超时'));
       }, timeout)
     };
     ws.__waiters.push(w);
@@ -124,19 +129,19 @@ async function main() {
     /* ============================ 1. 建房 + 进房 ============================ */
     section('1. 房主建房，两名房客进入');
 
-    const host = await connect('host', 'room1');
+    const host = await connect('host', ROOM_A);
     const rrP = waitFor(host, (m) => m.t === 'roomReady');
     send(host, { t: 'host', clientId: 'host-1' });
     const rr = await rrP;
     ok(rr && rr.t === 'roomReady', '房主收到 roomReady');
 
-    const g1 = await connect('guest1', 'room1');
+    const g1 = await connect('guest1', ROOM_A);
     const gj1 = waitFor(host, (m) => m.t === 'guestJoined' && m.guestId === 'g-1');
     send(g1, { t: 'guest', clientId: 'g-1' });
     const gj1m = await gj1;
     ok(gj1m.guestId === 'g-1', '房主收到 guestJoined(g-1)');
 
-    const g2 = await connect('guest2', 'room1');
+    const g2 = await connect('guest2', ROOM_A);
     const gj2 = waitFor(host, (m) => m.t === 'guestJoined' && m.guestId === 'g-2');
     send(g2, { t: 'guest', clientId: 'g-2' });
     await gj2;
@@ -175,14 +180,16 @@ async function main() {
 
     /* ============================ 5. 满员（第 4 个房客） ============================ */
     section('5. 满员拒绝');
-    const g3 = await connect('guest3', 'room1');
+    const g3 = await connect('guest3', ROOM_A);
+    const gj3 = waitFor(host, (m) => m.t === 'guestJoined' && m.guestId === 'g-3');
     send(g3, { t: 'guest', clientId: 'g-3' });
+    await gj3;   // 等房主确实收到 guestJoined，再发 welcome，避免竞态
     const w3 = waitFor(g3, (m) => m.t === 'guestMessage' && m.data.type === 'welcome');
     send(host, { t: 'toGuest', to: 'g-3', data: { type: 'welcome', seat: 3 } });
     await w3;
     ok(true, '第 3 名房客（第 4 人）也进来了');
 
-    const g4 = await connect('guest4', 'room1');
+    const g4 = await connect('guest4', ROOM_A);
     const full = waitFor(g4, (m) => m.t === 'roomFull');
     send(g4, { t: 'guest', clientId: 'g-4' });
     await full;
@@ -206,7 +213,7 @@ async function main() {
 
     /* ============================ 8. 房间不存在 ============================ */
     section('8. 房间不存在');
-    const nx = await connect('guestX', 'nosuchroom');
+    const nx = await connect('guestX', ROOM_X);
     const nf = waitFor(nx, (m) => m.t === 'roomNotFound');
     send(nx, { t: 'guest', clientId: 'x-1' });
     await nf;
@@ -216,42 +223,42 @@ async function main() {
     /* ============================ 9. 房主掉线宽限 + 重连 ============================ */
     section('9. 房主掉线宽限与重连恢复');
 
-    const h2 = await connect('host2', 'room2');
-    const rr2 = waitFor(h2, (m) => m.t === 'roomReady');
+    const h2 = await connect('host2', ROOM_B);
+    const rr2 = waitFor(h2, (m) => m.t === 'roomReady', 8000, 'roomReady');
     send(h2, { t: 'host', clientId: 'h2' });
     await rr2;
 
-    const c2 = await connect('client2', 'room2');
-    const cj = waitFor(h2, (m) => m.t === 'guestJoined' && m.guestId === 'c2');
+    const c2 = await connect('client2', ROOM_B);
+    const cj = waitFor(h2, (m) => m.t === 'guestJoined' && m.guestId === 'c2', 8000, 'guestJoined');
     send(c2, { t: 'guest', clientId: 'c2' });
     await cj;
-    const cw = waitFor(c2, (m) => m.t === 'guestMessage' && m.data.type === 'welcome');
+    const cw = waitFor(c2, (m) => m.t === 'guestMessage' && m.data.type === 'welcome', 8000, 'welcome');
     send(h2, { t: 'toGuest', to: 'c2', data: { type: 'welcome', seat: 1 } });
     await cw;
 
     // 房主掉线（强制断开传输）
-    const offline = waitFor(c2, (m) => m.t === 'hostOffline', null, 3000);
+    const offline = waitFor(c2, (m) => m.t === 'hostOffline', 10000, 'hostOffline');
     h2.terminate();
     await offline;
     ok(true, '房客收到 hostOffline');
 
     // 房主用同一 clientId 重连，应恢复（宽限期内）
-    const h2b = await connect('host2-rejoin', 'room2');
-    const rr2b = waitFor(h2b, (m) => m.t === 'roomReady');
+    const h2b = await connect('host2-rejoin', ROOM_B);
+    const rr2b = waitFor(h2b, (m) => m.t === 'roomReady', 8000, 'roomReady(重连)');
     send(h2b, { t: 'host', clientId: 'h2' });
     await rr2b;
-    const online = waitFor(c2, (m) => m.t === 'hostOnline', null, 3000);
+    const online = waitFor(c2, (m) => m.t === 'hostOnline', 10000, 'hostOnline');
     await online;
     ok(true, '房主同 clientId 重连恢复，房客收到 hostOnline');
 
     // 恢复后房主仍能广播
-    const still = waitFor(c2, (m) => m.t === 'guestMessage' && m.data.type === 'state' && m.data.s && m.data.s.ping === 1);
+    const still = waitFor(c2, (m) => m.t === 'guestMessage' && m.data.type === 'state' && m.data.s && m.data.s.ping === 1, 8000, 'state(恢复后)');
     send(h2b, { t: 'toGuests', data: { type: 'state', s: { ping: 1 } } });
     await still;
     ok(true, '恢复后房主仍能正常广播');
 
     // 房主彻底离开 -> 房客收到 hostLeft
-    const gone = waitFor(c2, (m) => m.t === 'hostLeft', null, 3000);
+    const gone = waitFor(c2, (m) => m.t === 'hostLeft', 10000, 'hostLeft');
     send(h2b, { t: 'leave' });
     await gone;
     ok(true, '房主主动离开，房客收到 hostLeft');

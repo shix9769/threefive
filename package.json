@@ -12,8 +12,10 @@
     "dev": "node server.js",
     "dev:cf": "wrangler dev",
     "deploy": "wrangler deploy",
+    "deploy:web": "cd pages && wrangler pages deploy --commit-dirty=true",
     "test": "node test/logic.test.js && node test/e2e.js && node test/frontend.test.js",
-    "test:worker": "E2E_BASE=http://127.0.0.1:8787 node test/e2e.js"
+    "test:worker": "E2E_BASE=http://127.0.0.1:8787 node test/e2e.js",
+    "test:live": "E2E_BASE=https://threefive-gomoku-web.pages.dev node test/e2e.js && FE_BASE=https://threefive-gomoku-web.pages.dev node test/frontend.test.js"
   },
   "dependencies": {
     "ws": "^8.18.0"

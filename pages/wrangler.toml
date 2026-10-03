@@ -1,0 +1,10 @@
+# Cloudflare Pages 项目配置
+# 静态前端来自 ../public（index.html + _worker.js 高级模式）
+name = "threefive-gomoku-web"
+pages_build_output_dir = "../public"
+compatibility_date = "2025-01-01"
+
+# 把 WebSocket 请求转发给定义 Durable Object 的 Worker
+[[services]]
+binding = "BACKEND"
+service = "threefive-gomoku"

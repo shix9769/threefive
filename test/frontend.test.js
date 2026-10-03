@@ -16,7 +16,10 @@ const { spawn } = require('child_process');
 const WebSocket = require('ws');
 
 const PORT = Number(process.env.FE_PORT) || 3998;
-const BASE = `http://127.0.0.1:${PORT}`;
+// 若设置了 FE_BASE（例如 https://threefive-gomoku-web.pages.dev），则直连该线上站点测试
+const EXTERNAL = process.env.FE_BASE || '';
+const BASE = EXTERNAL || `http://127.0.0.1:${PORT}`;
+const WS_BASE = BASE.replace(/^http/, 'ws');
 
 let passed = 0;
 let failed = 0;
@@ -99,7 +102,7 @@ setGlobal('WebSocket', WebSocket);
 /* ------------------------------------------------------------------ */
 function rawConnect(roomId, clientId) {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://127.0.0.1:${PORT}/room/${roomId}`);
+    const ws = new WebSocket(`${WS_BASE}/room/${roomId}`);
     ws.__queue = [];
     ws.__waiters = [];
     ws.on('message', (raw) => {
@@ -166,13 +169,18 @@ async function waitHttp(retries = 60) {
 
 /* ------------------------------------------------------------------ */
 async function main() {
-  const server = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
-    env: Object.assign({}, process.env, { PORT: String(PORT), GRACE_MS: '3000' }),
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
+  let server = null;
   const serverLog = [];
-  server.stdout.on('data', (d) => serverLog.push(String(d).trim()));
-  server.stderr.on('data', (d) => serverLog.push('ERR ' + String(d).trim()));
+  if (!EXTERNAL) {
+    server = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
+      env: Object.assign({}, process.env, { PORT: String(PORT), GRACE_MS: '3000' }),
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    server.stdout.on('data', (d) => serverLog.push(String(d).trim()));
+    server.stderr.on('data', (d) => serverLog.push('ERR ' + String(d).trim()));
+  } else {
+    serverLog.push('(外部后端模式：' + EXTERNAL + ')');
+  }
 
   try {
     const health = await waitHttp();
@@ -239,7 +247,7 @@ async function main() {
     console.log('--- 服务器日志尾部 ---');
     console.log(serverLog.slice(-20).join('\n'));
   } finally {
-    server.kill('SIGKILL');
+    if (server) server.kill('SIGKILL');
   }
 
   console.log('\n' + '='.repeat(60));

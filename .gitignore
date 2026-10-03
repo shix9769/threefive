@@ -8,3 +8,5 @@ pnpm-debug.log*
 *.log
 *.bak
 server.js.peerjs-backup
+.wrangler/
+.dev.vars

@@ -7,10 +7,9 @@
 <!-- SECTION: backend-config -->
 <script>
 /* ============================================================
- * ★★★ 唯一需要修改的部署配置 ★★★
- * 后端（Render）地址：
- *   · 本地测试：留空字符串 ''（自动使用当前页面的同源地址）
- *   · 线上部署：改成 Render 地址，例如 'https://threefive.onrender.com'
+ * 后端地址（一般留空即可）
+ *   · 同源部署：Cloudflare Worker 自带前端，或本地 node server.js —— 留空 ''
+ *   · 前端另放别处（如 Netlify）、后端在 Workers：填 'https://threefive-gomoku.你的子域.workers.dev'
  * 注意：不要带结尾的斜杠。
  * ============================================================ */
 window.GOMOKU_SERVER = '';
@@ -287,8 +286,11 @@ body{
   var btnRestart = document.getElementById('btnRestart');
 
   /* ---------- runtime state ---------- */
-  var socket = null;                 // socket.io 连接
-  var socketConnectedOnce = false;   // 首次连接完成标记（重连不再重复建房）
+  var ws = null;                     // WebSocket 连接
+  var wsConnectedOnce = false;       // 首次连接完成标记（重连不再重复建房）
+  var myClientId = genCode(16);      // 本标签页稳定身份（断线重连用）
+  var reconnectTimer = null;         // 断线重连计时器
+  var manualClose = false;           // 主动关闭时不自动重连
   var isHost = false;
   var joined = false;                // 房客是否已拿到座位
   var mySeat = -1;
@@ -421,18 +423,15 @@ body{
     overlayError.hidden = false;
   }
 
-  /* ---------- socket 联机层 ---------- */
-  function ensureIoClient(cb){
-    if (typeof io !== 'undefined'){ cb(); return; }
-    var s = document.createElement('script');
-    s.src = BACKEND_URL + '/socket.io/socket.io.js';
-    s.onload = cb;
-    s.onerror = function(){
-      showError('联机组件加载失败',
-        '无法从 ' + BACKEND_URL + '/socket.io/socket.io.js 加载 Socket.IO 客户端。请确认后端已启动，' +
-        '并检查 index.html 里的 window.GOMOKU_SERVER 是否配置正确。');
-    };
-    document.head.appendChild(s);
+  /* ---------- WebSocket 联机层 ---------- */
+  function wsSend(obj){
+    if (ws && ws.readyState === 1){
+      try { ws.send(JSON.stringify(obj)); } catch(e){}
+    }
+  }
+
+  function wsUrl(){
+    return BACKEND_URL.replace(/^http/, 'ws') + '/room/' + roomCode;
   }
 
   function bootstrap(){
@@ -449,115 +448,128 @@ body{
     }
     elRoomCode.textContent = roomCode.toUpperCase();
     document.getElementById('waitCode').textContent = roomCode.toUpperCase();
-    ensureIoClient(connectSocket);
+    connectWs();
   }
 
-  function connectSocket(){
-    try {
-      socket = io(BACKEND_URL, {
-        transports: ['websocket', 'polling'],
-        reconnection: true,
-        reconnectionDelay: 800,
-        reconnectionDelayMax: 5000,
-        timeout: 15000
-      });
-    } catch (e){
-      showError('无法连接服务器', String(e));
+  function connectWs(){
+    if (!BACKEND_URL){
+      showError('未配置后端地址',
+        '请把 index.html 顶部的 window.GOMOKU_SERVER 改成你的后端地址：\n' +
+        '· 本地测试：先 node server.js，留空即可；\n' +
+        '· 线上部署：填 Cloudflare Workers 地址。');
       return;
     }
+    manualClose = false;
+    var u;
+    try { u = wsUrl(); }
+    catch(e){ showError('连接失败', String(e)); return; }
+    try { ws = new WebSocket(u); }
+    catch(e){ showError('无法连接服务器', String(e)); return; }
 
-    socket.on('connect', function(){
-      if (socketConnectedOnce){
-        // 首次之后的重连：由服务端 connectionStateRecovery 自动恢复会话
-        if (socket.recovered) toast('连接已恢复');
-        else showError('连接已中断', '与服务器的连接未能恢复，请刷新页面重新加入房间。');
+    ws.onopen = function(){
+      if (wsConnectedOnce){
+        // 重连：用同一个 clientId 重新声明身份，服务端据此恢复房间/座位
+        wsSend({ t: isHost ? 'host' : 'guest', clientId: myClientId });
+        toast('连接已恢复');
         return;
       }
-      socketConnectedOnce = true;
+      wsConnectedOnce = true;
       if (isHost) hostCreateRoom(); else guestJoinRoom();
-    });
+    };
 
-    socket.on('connect_error', function(err){
-      if (socketConnectedOnce) return;
-      showError('无法连接服务器',
-        '连接 ' + BACKEND_URL + ' 失败：' + ((err && err.message) || '网络错误') + '\n' +
-        '· 页面部署在 Netlify 时，请把 index.html 里的 window.GOMOKU_SERVER 改成你的 Render 地址；\n' +
-        '· Render 免费实例冷启动约需 30~60 秒，稍等片刻刷新即可。');
-    });
+    ws.onmessage = function(e){
+      var msg;
+      try { msg = JSON.parse(e.data); } catch(err){ return; }
+      if (!msg || typeof msg !== 'object') return;
+      handleWsMessage(msg);
+    };
 
-    socket.on('disconnect', function(reason){
-      if (reason === 'io client disconnect') return;
-      toast('与服务器连接中断，正在重连…');
-    });
-
-    socket.on('serverError', function(p){
-      showError('服务器错误', (p && p.message) || '未知错误');
-    });
-
-    /* ---- 房主侧事件 ---- */
-    socket.on('roomReady', function(){
-      showWaiting();
-      render();
-    });
-    socket.on('roomExists', function(){
-      // 极小概率撞号：换一个房间号重开
-      roomCode = genCode(4);
-      history.replaceState(null, '', '#' + roomCode);
-      elRoomCode.textContent = roomCode.toUpperCase();
-      document.getElementById('waitCode').textContent = roomCode.toUpperCase();
-      socket.emit('createRoom', { roomId: roomCode });
-    });
-    socket.on('guestJoined', function(p){
-      if (p && p.guestId) hostHandleJoin(p.guestId);
-    });
-    socket.on('guestLeft', function(p){
-      if (p && p.guestId) hostHandleClientClose(p.guestId);
-    });
-    socket.on('hostMessage', function(p){
-      if (!p || typeof p.from !== 'string') return;
-      var seat = guestSeatMap[p.from];
-      if (seat === undefined || seat === null) return;
-      var d = p.data;
-      if (!d || typeof d !== 'object') return;
-      if (d.type === 'move') hostApplyMove(seat, d.idx);
-      else if (d.type === 'restart') hostRequestedRestart(seat);
-      else if (d.type === 'color') hostApplyColor(seat, d.color);
-    });
-    socket.on('hostOnline', function(){ toast('房主已重新连接'); });
-    socket.on('hostOffline', function(){ toast('房主连接中断，等待重连…'); });
-    socket.on('hostLeft', function(){
-      overlayWait.hidden = true;
-      showError('房间已解散', '房主已离开或关闭了页面，本局结束。你可以创建一个新房间继续玩。');
-    });
-
-    /* ---- 房客侧事件 ---- */
-    socket.on('roomNotFound', function(p){
-      showError('房间不存在',
-        (p && p.hostOffline)
-          ? '房主暂时掉线了，房间会保留约 1 分钟，请稍等后刷新页面重试。'
-          : '没有找到该房间，房主可能还未打开页面或已离开。请让第一位玩家先打开链接创建房间。');
-    });
-    socket.on('roomFull', function(){
-      showError('房间已满', '这个房间人数已满（最多 4 人）。可以自己创建一个新房间，或等有人离开后再试。');
-    });
-    socket.on('guestMessage', function(d){
-      if (!d || typeof d !== 'object') return;
-      if (d.type === 'welcome'){
-        joined = true;
-        mySeat = d.seat;
-        showWaiting();
-      } else if (d.type === 'full'){
-        var m = MODES[d.mode] || MODES.ffa3;
-        showError('房间已满', '这个房间是「' + m.label + '」且玩家已满。可以让房主在开局前切换更大的模式，或自己创建一个新房间。');
-      } else if (d.type === 'kicked'){
-        showError('已离开房间', '房主把模式切换成了人数更少的玩法，你被移出了本局。可以创建一个新房间继续玩。');
-      } else if (d.type === 'colorRejected'){
-        toast('这个颜色已被占用，请换一个');
-      } else if (d.type === 'state'){
-        S = d.s;
-        if (joined && mySeat >= 0) onStateReceived();
+    ws.onerror = function(){
+      if (!wsConnectedOnce){
+        showError('无法连接服务器',
+          '连接 ' + BACKEND_URL + ' 失败。\n' +
+          '· 页面部署在 Netlify 时，请把 index.html 里的 window.GOMOKU_SERVER 改成你的后端地址；\n' +
+          '· 本地测试请先启动后端（node server.js）。');
       }
-    });
+    };
+
+    ws.onclose = function(){
+      if (manualClose) return;
+      toast('与服务器连接中断，正在重连…');
+      clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(connectWs, 1500);
+    };
+  }
+
+  function handleWsMessage(msg){
+    switch (msg.t){
+      /* ---- 房主侧 ---- */
+      case 'roomReady':
+        if (isHost) broadcastState();
+        showWaiting();
+        render();
+        break;
+      case 'roomTaken':
+        showError('房间被占用', '这个房间已有房主。请刷新页面重新建房。');
+        break;
+      case 'guestJoined':
+        if (msg.guestId) hostHandleJoin(msg.guestId);
+        break;
+      case 'guestLeft':
+        if (msg.guestId) hostHandleClientClose(msg.guestId);
+        break;
+      case 'toHost': {
+        if (typeof msg.from !== 'string') break;
+        var seat = guestSeatMap[msg.from];
+        if (seat === undefined || seat === null) break;
+        var d = msg.data;
+        if (!d || typeof d !== 'object') break;
+        if (d.type === 'move') hostApplyMove(seat, d.idx);
+        else if (d.type === 'restart') hostRequestedRestart(seat);
+        else if (d.type === 'color') hostApplyColor(seat, d.color);
+        break;
+      }
+      case 'hostOnline':
+        toast('房主已重新连接');
+        break;
+      case 'hostOffline':
+        toast('房主连接中断，等待重连…');
+        break;
+      case 'hostLeft':
+        overlayWait.hidden = true;
+        showError('房间已解散', '房主已离开或关闭了页面，本局结束。你可以创建一个新房间继续玩。');
+        break;
+
+      /* ---- 房客侧 ---- */
+      case 'roomNotFound':
+        showError('房间不存在', '没有找到该房间，房主可能还未打开页面或已离开。请让第一位玩家先打开链接创建房间。');
+        break;
+      case 'roomFull':
+        showError('房间已满', '这个房间人数已满（最多 4 人）。可以自己创建一个新房间，或等有人离开后再试。');
+        break;
+      case 'guestMessage': {
+        var gd = msg.data;
+        if (!gd || typeof gd !== 'object') break;
+        if (gd.type === 'welcome'){
+          joined = true;
+          mySeat = gd.seat;
+          showWaiting();
+        } else if (gd.type === 'full'){
+          var m = MODES[gd.mode] || MODES.ffa3;
+          showError('房间已满', '这个房间是「' + m.label + '」且玩家已满。可以让房主在开局前切换更大的模式，或自己创建一个新房间。');
+        } else if (gd.type === 'kicked'){
+          showError('已离开房间', '房主把模式切换成了人数更少的玩法，你被移出了本局。可以创建一个新房间继续玩。');
+        } else if (gd.type === 'colorRejected'){
+          toast('这个颜色已被占用，请换一个');
+        } else if (gd.type === 'state'){
+          S = gd.s;
+          if (joined && mySeat >= 0) onStateReceived();
+        }
+        break;
+      }
+      case 'pong':
+        break;
+    }
   }
 
   function hostCreateRoom(){
@@ -565,14 +577,14 @@ body{
     mySeat = 0;
     joined = true;
     S = freshState('ffa3');
-    socket.emit('createRoom', { roomId: roomCode });
+    wsSend({ t:'host', clientId: myClientId });
   }
 
   function guestJoinRoom(){
     isHost = false;
     mySeat = -1;
     joined = false;
-    socket.emit('joinRoom', { roomId: roomCode });
+    wsSend({ t:'guest', clientId: myClientId });
   }
 
   /** 房主：给新来的房客分配座位 */
@@ -584,7 +596,7 @@ body{
     }
     if (seat === -1){
       // 座位不够：让服务器把他请出房间，并告诉他原因
-      socket.emit('kickGuest', { to: guestId, data: { type:'full', mode:S.mode } });
+      wsSend({ t:'kick', to: guestId, data: { type:'full', mode:S.mode } });
       return;
     }
     // 他之前可能占着别的座位，先释放
@@ -624,13 +636,13 @@ body{
   }
 
   function sendToGuest(guestId, obj){
-    if (!socket || !guestId) return;
-    socket.emit('toGuest', { to: guestId, data: obj });
+    if (!guestId) return;
+    wsSend({ t:'toGuest', to: guestId, data: obj });
   }
 
   function broadcastState(){
-    if (!isHost || !S || !socket) return;
-    socket.emit('toGuests', { type:'state', s: plainState() });
+    if (!isHost || !S || !ws) return;
+    wsSend({ t:'toGuests', data: { type:'state', s: plainState() } });
     render();
     maybeShowResult();
   }
@@ -644,7 +656,13 @@ body{
   }
 
   function sendToHost(obj){
-    if (socket) socket.emit('toHost', obj);
+    wsSend({ t:'toHost', data: obj });
+  }
+
+  function leaveRoom(){
+    manualClose = true;
+    wsSend({ t:'leave' });
+    try { if (ws) ws.close(); } catch(e){}
   }
 
   /* ---------- mode switching (host only, pre-game) ---------- */
@@ -657,7 +675,7 @@ body{
       if (S.joined[i]){
         var kickedId = clientConns[i];
         if (kickedId){
-          socket.emit('kickGuest', { to: kickedId, data: { type:'kicked' } });
+          wsSend({ t:'kick', to: kickedId, data: { type:'kicked' } });
           delete guestSeatMap[kickedId];
           clientConns[i] = null;
         }
@@ -1183,7 +1201,7 @@ body{
   btnRestart.addEventListener('click', requestRestart);
   document.getElementById('btnRestart2').addEventListener('click', requestRestart);
   function newRoom(){
-    if (socket) socket.emit('leaveRoom');
+    leaveRoom();
     location.hash = '';
     location.reload();
   }
@@ -1220,7 +1238,7 @@ body{
   });
 
   window.addEventListener('beforeunload', function(){
-    if (socket) socket.emit('leaveRoom');
+    leaveRoom();
   });
 
   /* ---------- boot ---------- */

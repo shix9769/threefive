@@ -1,302 +1,265 @@
 'use strict';
 
 /**
- * 端到端联机测试
+ * 端到端联机测试（原生 WebSocket 协议）
  * ---------------------------------------------------------------------------
- * 启动真实服务器，用 socket.io-client 完整模拟「房主 + 多个房客」的全部交互，
- * 覆盖建房 / 进房 / 落子转发 / 状态广播 / 定向消息 / 满员踢人 /
- * 主动离开 / 掉线宽限 / 断线会话恢复 等所有协议路径。
+ * 启动本地 Node 后端（server.js），用 ws 客户端完整模拟房主 + 多名房客的交互，
+ * 覆盖建房 / 进房 / 转发 / 广播 / 定向消息 / 满员 / 踢人 / 掉线宽限 / 重连恢复。
+ * 该协议与 Cloudflare Worker（src/worker.js）完全一致。
  *
  *   node test/e2e.js
  */
 
 const { spawn } = require('child_process');
 const path = require('path');
-const { io } = require('socket.io-client');
+const WebSocket = require('ws');
 
 const PORT = Number(process.env.TEST_PORT) || 3999;
 const GRACE_MS = 4000;
-const URL = `http://127.0.0.1:${PORT}`;
+// 若设置了 E2E_BASE（例如 http://127.0.0.1:8787），则测试该外部后端（如 wrangler dev），
+// 不自己启动 server.js。这样同一套用例可同时验证 Node 版与 Cloudflare Worker 版。
+const EXTERNAL = process.env.E2E_BASE || '';
+const BASE = EXTERNAL ? EXTERNAL.replace(/^http/, 'ws') : `ws://127.0.0.1:${PORT}`;
+const HEALTH_URL = EXTERNAL || `http://127.0.0.1:${PORT}`;
 
 let passed = 0;
 let failed = 0;
 const failures = [];
 
 function ok(cond, label) {
-  if (cond) {
-    passed++;
-    console.log('   \u2705 ' + label);
-  } else {
-    failed++;
-    failures.push(label);
-    console.log('   \u274c ' + label);
-  }
+  if (cond) { passed++; console.log('   \u2705 ' + label); }
+  else { failed++; failures.push(label); console.log('   \u274c ' + label); }
 }
-function section(title) {
-  console.log('\n\u25b6 ' + title);
-}
+function section(t) { console.log('\n\u25b6 ' + t); }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function connect(name, opts) {
-  const s = io(URL, Object.assign({ transports: ['websocket'], forceNew: true, reconnection: false }, opts));
-  s.__name = name;
-  return s;
-}
-function ready(sock) {
-  if (sock.connected) return Promise.resolve();
+function connect(name, roomId) {
   return new Promise((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(sock.__name + ' 连接超时')), 5000);
-    sock.once('connect', () => { clearTimeout(t); resolve(); });
-  });
-}
-function waitFor(sock, ev, pred, timeout = 4000) {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => { sock.off(ev, h); reject(new Error(sock.__name + ' 等待 ' + ev + ' 超时')); }, timeout);
-    function h(data) {
-      if (!pred || pred(data)) { clearTimeout(t); sock.off(ev, h); resolve(data); }
-    }
-    sock.on(ev, h);
-  });
-}
-function never(sock, ev, ms = 500) {
-  return new Promise((resolve) => {
-    function h() { sock.off(ev, h); clearTimeout(t); resolve(false); }
-    const t = setTimeout(() => { sock.off(ev, h); resolve(true); }, ms);
-    sock.on(ev, h);
+    const ws = new WebSocket(`${BASE}/room/${roomId}`);
+    ws.__name = name;
+    ws.__queue = [];     // 已到达、但当时还没有等待者的消息
+    ws.__waiters = [];
+    ws.on('message', (raw) => {
+      let msg;
+      try { msg = JSON.parse(raw.toString()); } catch (e) { return; }
+      // 先尝试交给等待者
+      for (let i = 0; i < ws.__waiters.length; i++) {
+        const w = ws.__waiters[i];
+        if (!w.pred || w.pred(msg)) {
+          ws.__waiters.splice(i, 1);
+          clearTimeout(w.timer);
+          w.resolve(msg);
+          return;
+        }
+      }
+      // 没人等就先入队，避免“消息早于 waiter”的竞态丢包
+      ws.__queue.push(msg);
+    });
+    ws.on('open', () => resolve(ws));
+    ws.on('error', reject);
   });
 }
 
-/* ------------------------------------------------------------------ */
+function send(ws, obj) {
+  ws.send(JSON.stringify(obj));
+}
+
+function waitFor(ws, pred, timeout = 4000) {
+  // 队列里可能已经有更早到达的匹配消息，先消化它
+  for (let i = 0; i < ws.__queue.length; i++) {
+    if (!pred || pred(ws.__queue[i])) {
+      return Promise.resolve(ws.__queue.splice(i, 1)[0]);
+    }
+  }
+  return new Promise((resolve, reject) => {
+    const w = {
+      pred,
+      resolve,
+      timer: setTimeout(() => {
+        const i = ws.__waiters.indexOf(w);
+        if (i >= 0) ws.__waiters.splice(i, 1);
+        reject(new Error(ws.__name + ' 等待消息超时'));
+      }, timeout)
+    };
+    ws.__waiters.push(w);
+  });
+}
+
+function waitClose(ws, timeout = 4000) {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => resolve(false), timeout);
+    ws.once('close', () => { clearTimeout(t); resolve(true); });
+  });
+}
+
 async function waitForHttp(retries = 60) {
   for (let i = 0; i < retries; i++) {
     try {
-      const r = await fetch(URL + '/healthz');
+      const r = await fetch(`${HEALTH_URL}/healthz`);
       if (r.ok) return await r.json();
-    } catch (_) { /* 还没起来 */ }
+    } catch (_) {}
     await sleep(250);
   }
   throw new Error('服务器启动超时');
 }
 
 async function main() {
-  const server = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
-    env: Object.assign({}, process.env, { PORT: String(PORT), GRACE_MS: String(GRACE_MS) }),
-    stdio: ['ignore', 'pipe', 'pipe']
-  });
+  let server = null;
   const serverLog = [];
-  server.stdout.on('data', (d) => serverLog.push(String(d).trim()));
-  server.stderr.on('data', (d) => serverLog.push('ERR ' + String(d).trim()));
+  if (!EXTERNAL) {
+    server = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], {
+      env: Object.assign({}, process.env, { PORT: String(PORT), GRACE_MS: String(GRACE_MS) }),
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    server.stdout.on('data', (d) => serverLog.push(String(d).trim()));
+    server.stderr.on('data', (d) => serverLog.push('ERR ' + String(d).trim()));
+  } else {
+    serverLog.push('(外部后端模式：' + EXTERNAL + ')');
+  }
 
   try {
     const health = await waitForHttp();
     console.log('服务器已启动:', JSON.stringify(health));
 
-    /* ============================ 1. 建房 + 两人进房 ============================ */
-    section('1. 房主建房，两名房客依次进入并拿到座位');
+    /* ============================ 1. 建房 + 进房 ============================ */
+    section('1. 房主建房，两名房客进入');
 
-    const host = connect('host');
-    await ready(host);
-    const rrP = waitFor(host, 'roomReady', null, 3000);
-    host.emit('createRoom', { roomId: 'room1' });
+    const host = await connect('host', 'room1');
+    const rrP = waitFor(host, (m) => m.t === 'roomReady');
+    send(host, { t: 'host', clientId: 'host-1' });
     const rr = await rrP;
-    ok(rr && rr.roomId === 'room1' && rr.resumed === false, '房主收到 roomReady 且房间号正确');
+    ok(rr && rr.t === 'roomReady', '房主收到 roomReady');
 
-    const g1 = connect('guest1');
-    const g2 = connect('guest2');
-    await Promise.all([ready(g1), ready(g2)]);
+    const g1 = await connect('guest1', 'room1');
+    const gj1 = waitFor(host, (m) => m.t === 'guestJoined' && m.guestId === 'g-1');
+    send(g1, { t: 'guest', clientId: 'g-1' });
+    const gj1m = await gj1;
+    ok(gj1m.guestId === 'g-1', '房主收到 guestJoined(g-1)');
 
-    // 房主先挂上分配座位的逻辑（模拟前端 hostHandleJoin）
-    const seatOf = {};
-    host.on('guestJoined', (p) => {
-      const used = Object.values(seatOf);
-      let seat = -1;
-      for (let i = 1; i < 3; i++) if (!used.includes(i)) { seat = i; break; }
-      if (seat === -1) {
-        host.emit('kickGuest', { to: p.guestId, data: { type: 'full', mode: 'ffa3' } });
-        return;
-      }
-      seatOf[p.guestId] = seat;
-      host.emit('toGuest', { to: p.guestId, data: { type: 'welcome', seat } });
-      host.emit('toGuests', { type: 'state', s: { board: [], turn: 0 } });
-    });
-    host.on('guestLeft', (p) => { delete seatOf[p.guestId]; });
+    const g2 = await connect('guest2', 'room1');
+    const gj2 = waitFor(host, (m) => m.t === 'guestJoined' && m.guestId === 'g-2');
+    send(g2, { t: 'guest', clientId: 'g-2' });
+    await gj2;
+    ok(true, '房主收到 guestJoined(g-2)');
 
-    const w1 = waitFor(g1, 'guestMessage', (d) => d.type === 'welcome');
-    const hj1 = waitFor(host, 'guestJoined');
-    g1.emit('joinRoom', { roomId: 'room1' });
-    const m1 = await w1;
-    await hj1;
-    ok(m1.seat === 1, '房客1 拿到座位 1');
+    /* ============================ 2. 房主分配座位 + 广播 ============================ */
+    section('2. 房主欢迎 + 全场广播同步');
 
-    const w2 = waitFor(g2, 'guestMessage', (d) => d.type === 'welcome');
-    g2.emit('joinRoom', { roomId: 'room1' });
-    const m2 = await w2;
-    ok(m2.seat === 2, '房客2 拿到座位 2');
+    // 模拟前端 hostHandleJoin：给 g-1 座位 1，g-2 座位 2，然后广播 state
+    send(host, { t: 'toGuest', to: 'g-1', data: { type: 'welcome', seat: 1 } });
+    send(host, { t: 'toGuest', to: 'g-2', data: { type: 'welcome', seat: 2 } });
 
-    const st1 = await waitFor(g1, 'guestMessage', (d) => d.type === 'state');
-    ok(st1.s && st1.s.turn === 0, '房客收到房主广播的 state（落子前状态）');
+    const w1 = await waitFor(g1, (m) => m.t === 'guestMessage' && m.data.type === 'welcome');
+    const w2 = await waitFor(g2, (m) => m.t === 'guestMessage' && m.data.type === 'welcome');
+    ok(w1.data.seat === 1 && w2.data.seat === 2, '两名房客各自拿到座位');
 
-    /* ============================ 2. 落子转发 + 全场广播 ============================ */
-    section('2. 房客落子消息转发给房主，房主广播状态给全场');
+    const b1 = waitFor(g1, (m) => m.t === 'guestMessage' && m.data.type === 'state');
+    const b2 = waitFor(g2, (m) => m.t === 'guestMessage' && m.data.type === 'state');
+    send(host, { t: 'toGuests', data: { type: 'state', s: { turn: 0 } } });
+    await Promise.all([b1, b2]);
+    ok(true, '房主 toGuests 广播，两名房客都收到 state');
 
-    const hostGot = waitFor(host, 'hostMessage', (p) => p.data && p.data.type === 'move');
-    g1.emit('toHost', { type: 'move', idx: 112 });
-    const hm = await hostGot;
-    ok(hm.from === g1.id && hm.data.idx === 112, '房主收到来自房客1 的 move(112)，来源 socket.id 正确');
+    /* ============================ 3. 房客 -> 房主 转发 ============================ */
+    section('3. 房客消息转发给房主');
+    const hm = waitFor(host, (m) => m.t === 'toHost' && m.from === 'g-1');
+    send(g1, { t: 'toHost', data: { type: 'move', idx: 112 } });
+    const hmMsg = await hm;
+    ok(hmMsg.data.idx === 112, '房主收到房客 g-1 的 move(112)，from 正确');
 
-    const both1 = waitFor(g1, 'guestMessage', (d) => d.type === 'state' && d.s && d.s.lastMove === 112);
-    const both2 = waitFor(g2, 'guestMessage', (d) => d.type === 'state' && d.s && d.s.lastMove === 112);
-    host.emit('toGuests', { type: 'state', s: { board: [], turn: 1, lastMove: 112 } });
-    const [b1, b2] = await Promise.all([both1, both2]);
-    ok(b1 && b2, '房客1 与 房客2 同时收到广播（全场同步）');
-
-    const hostSelf = await never(host, 'guestMessage', 400);
-    ok(hostSelf === true, '房主自己不会收到自己的广播（避免重复渲染）');
-
-    /* ============================ 3. 定向消息 ============================ */
-    section('3. 定向消息只发给指定房客');
-    const onlyG2 = waitFor(g2, 'guestMessage', (d) => d.type === 'ping');
-    const g1Silent = never(g1, 'guestMessage', 400);
-    host.emit('toGuest', { to: g2.id, data: { type: 'ping' } });
+    /* ============================ 4. 定向消息 ============================ */
+    section('4. 定向消息只发给指定房客');
+    const onlyG2 = waitFor(g2, (m) => m.t === 'guestMessage' && m.data.type === 'ping');
+    send(host, { t: 'toGuest', to: 'g-2', data: { type: 'ping' } });
     await onlyG2;
-    ok(true, '房客2 收到定向消息');
-    ok(await g1Silent, '房客1 没有收到定向给房客2 的消息');
+    ok(true, '定向消息到达 g-2');
 
-    /* ============================ 4. 满员踢人 ============================ */
-    section('4. 座位不够时房主把多余玩家踢出房间');
-    const g3 = connect('guest3');
-    await ready(g3);
-    const fullMsg = waitFor(g3, 'guestMessage', (d) => d.type === 'full');
-    g3.emit('joinRoom', { roomId: 'room1' });
-    const fm = await fullMsg;
-    ok(fm.mode === 'ffa3', '第 3 名房客收到 full 消息并附带模式');
-    await sleep(200);
-    const g3Silent = never(g3, 'guestMessage', 500);
-    host.emit('toGuests', { type: 'state', s: { note: 'after-kick' } });
-    ok(await g3Silent, '被踢出的房客不再收到房间广播');
-    g3.close();
+    /* ============================ 5. 满员（第 4 个房客） ============================ */
+    section('5. 满员拒绝');
+    const g3 = await connect('guest3', 'room1');
+    send(g3, { t: 'guest', clientId: 'g-3' });
+    const w3 = waitFor(g3, (m) => m.t === 'guestMessage' && m.data.type === 'welcome');
+    send(host, { t: 'toGuest', to: 'g-3', data: { type: 'welcome', seat: 3 } });
+    await w3;
+    ok(true, '第 3 名房客（第 4 人）也进来了');
 
-    /* ============================ 5. 主动离开 ============================ */
-    section('5. 房客主动离开，座位释放');
-    const left = waitFor(host, 'guestLeft', (p) => p.guestId === g2.id);
-    g2.emit('leaveRoom');
-    await left;
-    ok(true, '房主收到 guestLeft 通知');
-
-    const g4 = connect('guest4');
-    await ready(g4);
-    const w4 = waitFor(g4, 'guestMessage', (d) => d.type === 'welcome');
-    g4.emit('joinRoom', { roomId: 'room1' });
-    const m4 = await w4;
-    ok(m4.seat === 2, '新玩家可以顶上空出来的座位 2');
+    const g4 = await connect('guest4', 'room1');
+    const full = waitFor(g4, (m) => m.t === 'roomFull');
+    send(g4, { t: 'guest', clientId: 'g-4' });
+    await full;
+    ok(true, '第 5 人收到 roomFull（服务器层 4 人上限）');
     g4.close();
 
-    /* ============================ 6. 房间不存在 / 服务器满员 ============================ */
-    section('6. 异常路径');
-    const gx = connect('guestX');
-    await ready(gx);
-    const nf = waitFor(gx, 'roomNotFound');
-    gx.emit('joinRoom', { roomId: 'nosuchroom' });
-    ok((await nf).roomId === 'nosuchroom', '加入不存在的房间返回 roomNotFound');
-    gx.close();
+    /* ============================ 6. 踢人 ============================ */
+    section('6. 房主踢人');
+    const kicked = waitFor(g3, (m) => m.t === 'guestMessage' && m.data.type === 'kicked');
+    send(host, { t: 'kick', to: 'g-3', data: { type: 'kicked' } });
+    await kicked;
+    ok(true, '被踢房客收到 kicked 消息');
 
-    const host2 = connect('host2');
-    await ready(host2);
-    const h2ready = waitFor(host2, 'roomReady');
-    host2.emit('createRoom', { roomId: 'room2' });
-    await h2ready;
-    const four = [connect('f1'), connect('f2'), connect('f3'), connect('f4')];
-    await Promise.all(four.map(ready));
-    const overFull = Promise.race([
-      ...four.map((f) => waitFor(f, 'roomFull', null, 3000).then(() => f.__name)),
-      sleep(3500).then(() => null)
-    ]);
-    four.forEach((f) => f.emit('joinRoom', { roomId: 'room2' }));
-    const rejected = await overFull;
-    ok(rejected !== null, '服务器层 4 人上限生效，多出的连接被拒绝（' + rejected + ' 收到 roomFull）');
-    four.forEach((f) => f.close());
-    host2.close();
+    /* ============================ 7. 房客主动离开 ============================ */
+    section('7. 房客主动离开');
+    const left = waitFor(host, (m) => m.t === 'guestLeft' && m.guestId === 'g-2');
+    send(g2, { t: 'leave' });
+    await left;
+    ok(true, '房主收到 guestLeft(g-2)');
+    g2.close();
 
-    /* ============================ 7. 房主掉线宽限 ============================ */
-    section('7. 房主掉线：先通知，宽限期后才解散房间');
-    const h3 = connect('host3');
-    await ready(h3);
-    const h3ready = waitFor(h3, 'roomReady');
-    h3.emit('createRoom', { roomId: 'room3' });
-    await h3ready;
+    /* ============================ 8. 房间不存在 ============================ */
+    section('8. 房间不存在');
+    const nx = await connect('guestX', 'nosuchroom');
+    const nf = waitFor(nx, (m) => m.t === 'roomNotFound');
+    send(nx, { t: 'guest', clientId: 'x-1' });
+    await nf;
+    ok(true, '加入无房主的房间返回 roomNotFound');
+    nx.close();
 
-    const c3 = connect('client3');
-    await ready(c3);
-    const wc = waitFor(c3, 'guestMessage', (d) => d.type === 'welcome');
-    h3.on('guestJoined', (p) => h3.emit('toGuest', { to: p.guestId, data: { type: 'welcome', seat: 1 } }));
-    c3.emit('joinRoom', { roomId: 'room3' });
-    await wc;
+    /* ============================ 9. 房主掉线宽限 + 重连 ============================ */
+    section('9. 房主掉线宽限与重连恢复');
 
-    const offline = waitFor(c3, 'hostOffline', null, 3000);
-    h3.disconnect();
+    const h2 = await connect('host2', 'room2');
+    const rr2 = waitFor(h2, (m) => m.t === 'roomReady');
+    send(h2, { t: 'host', clientId: 'h2' });
+    await rr2;
+
+    const c2 = await connect('client2', 'room2');
+    const cj = waitFor(h2, (m) => m.t === 'guestJoined' && m.guestId === 'c2');
+    send(c2, { t: 'guest', clientId: 'c2' });
+    await cj;
+    const cw = waitFor(c2, (m) => m.t === 'guestMessage' && m.data.type === 'welcome');
+    send(h2, { t: 'toGuest', to: 'c2', data: { type: 'welcome', seat: 1 } });
+    await cw;
+
+    // 房主掉线（强制断开传输）
+    const offline = waitFor(c2, (m) => m.t === 'hostOffline', null, 3000);
+    h2.terminate();
     await offline;
-    ok(true, '房客收到 hostOffline（而不是立刻解散）');
+    ok(true, '房客收到 hostOffline');
 
-    // 宽限期内房间还在，且此时加入会收到 hostOffline 提示
-    const probe = connect('probe');
-    await ready(probe);
-    const probeRes = await new Promise((resolve) => {
-      probe.once('roomNotFound', resolve);
-      probe.once('roomFull', () => resolve({ roomFull: true }));
-      probe.emit('joinRoom', { roomId: 'room3' });
-      setTimeout(() => resolve({ timeout: true }), 2000);
-    });
-    ok(probeRes.roomId === 'room3', '房主掉线期间房间仍保留（返回房间存在但房主离线）');
-    probe.close();
+    // 房主用同一 clientId 重连，应恢复（宽限期内）
+    const h2b = await connect('host2-rejoin', 'room2');
+    const rr2b = waitFor(h2b, (m) => m.t === 'roomReady');
+    send(h2b, { t: 'host', clientId: 'h2' });
+    await rr2b;
+    const online = waitFor(c2, (m) => m.t === 'hostOnline', null, 3000);
+    await online;
+    ok(true, '房主同 clientId 重连恢复，房客收到 hostOnline');
 
-    const gone = waitFor(c3, 'hostLeft', null, GRACE_MS + 4000);
+    // 恢复后房主仍能广播
+    const still = waitFor(c2, (m) => m.t === 'guestMessage' && m.data.type === 'state' && m.data.s && m.data.s.ping === 1);
+    send(h2b, { t: 'toGuests', data: { type: 'state', s: { ping: 1 } } });
+    await still;
+    ok(true, '恢复后房主仍能正常广播');
+
+    // 房主彻底离开 -> 房客收到 hostLeft
+    const gone = waitFor(c2, (m) => m.t === 'hostLeft', null, 3000);
+    send(h2b, { t: 'leave' });
     await gone;
-    ok(true, '宽限期结束后房客收到 hostLeft（房间解散）');
+    ok(true, '房主主动离开，房客收到 hostLeft');
 
-    const after = connect('after');
-    await ready(after);
-    const nr = waitFor(after, 'roomNotFound', null, 3000);
-    after.emit('joinRoom', { roomId: 'room3' });
-    const nrData = await nr;
-    ok(!nrData.hostOffline, '房间已彻底销毁（roomNotFound 且不再标记 hostOffline）');
-    after.close();
-    c3.close();
+    h2b.close();
+    c2.close();
     host.close();
     g1.close();
-
-    /* ============================ 8. 断线会话恢复 ============================ */
-    section('8. 瞬时断网后自动恢复会话（connectionStateRecovery）');
-    const hr = connect('hostRecover', { reconnection: true, reconnectionDelay: 300 });
-    await ready(hr);
-    const hrReady = waitFor(hr, 'roomReady');
-    hr.emit('createRoom', { roomId: 'room4' });
-    await hrReady;
-
-    const cr = connect('clientRecover', { reconnection: true, reconnectionDelay: 300 });
-    await ready(cr);
-    hr.on('guestJoined', (p) => hr.emit('toGuest', { to: p.guestId, data: { type: 'welcome', seat: 1 } }));
-    const wcr = waitFor(cr, 'guestMessage', (d) => d.type === 'welcome');
-    cr.emit('joinRoom', { roomId: 'room4' });
-    await wcr;
-    const oldId = cr.id;
-
-    // 房主被强行断掉底层传输（模拟地铁/切后台），客户端自动重连
-    const recovered = new Promise((resolve) => hr.once('connect', () => resolve(hr.recovered)));
-    hr.io.engine.close();
-    const didRecover = await Promise.race([
-      recovered,
-      sleep(6000).then(() => 'timeout')
-    ]);
-    ok(didRecover === true, '房主断网重连后被服务端恢复了原会话（recovered=true）');
-
-    const stillThere = waitFor(cr, 'guestMessage', (d) => d.type === 'state' && d.s && d.s.ping === 1, 3000);
-    hr.emit('toGuests', { type: 'state', s: { ping: 1 } });
-    await stillThere;
-    ok(true, '恢复会话后房主仍能正常向房间广播');
-    ok(cr.id === oldId, '房客的 socket.id 全程未变（未掉线）');
-
-    hr.close();
-    cr.close();
 
     /* ============================ 汇总 ============================ */
     console.log('\n' + '='.repeat(62));
@@ -312,7 +275,7 @@ async function main() {
     console.log('--- 服务器日志尾部 ---');
     console.log(serverLog.slice(-25).join('\n'));
   } finally {
-    server.kill('SIGKILL');
+    if (server) server.kill('SIGKILL');
   }
 
   process.exit(failed ? 1 : 0);

@@ -1,0 +1,18 @@
+name = "threefive-gomoku"
+main = "src/worker.js"
+compatibility_date = "2025-01-01"
+
+# 把 public/index.html 当纯文本打进 Worker：前端 + 后端同源，一条命令部署
+[[rules]]
+type = "Text"
+globs = ["**/*.html"]
+fallthrough = true
+
+# Durable Object 绑定：每个房间一个 Room 实例
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "Room"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]

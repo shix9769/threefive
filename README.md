@@ -1,173 +1,166 @@
-# 多人五子棋（三人 / 四人 · 联机版）
+# 多人五子棋（25×25 · 三人 / 四人 · 可自选颜色）
 
 三人自由战、四人自由战、四人 2v2 组队；**25×25 大棋盘**；支持**自选棋子颜色**；纯浏览器联机，无需下载。
 
-## 架构
+## 架构：一个 Worker 同时托管前端 + 联机后端
 
 ```
-┌─────────────────┐        WebSocket         ┌──────────────────────┐
-│   Netlify        │  ◄────────────────────►  │   Render             │
-│   public/        │   （房间 + 消息中转）      │   server.js          │
-│   index.html     │                          │   (Socket.IO)        │
-└─────────────────┘                          └──────────────────────┘
+   浏览器
+     │  https://threefive-gomoku.<子域>.workers.dev/         → 返回前端页面
+     │  wss://threefive-gomoku.<子域>.workers.dev/room/ab12  → 联机中继
+     ▼
+┌──────────────────────────── Cloudflare Worker ────────────────────────────┐
+│  fetch()                                                                  │
+│   ├─ /                → public/index.html（前端，已打进 Worker）            │
+│   ├─ /healthz         → 健康检查                                            │
+│   └─ /room/<房间号>    → Durable Object「Room」实例（每个房间一个）           │
+│                          · 记录房主 / 房客连接                              │
+│                          · 转发落子、广播棋局状态                            │
+│                          · 掉线 90 秒内可重连恢复                            │
+└───────────────────────────────────────────────────────────────────────────┘
 ```
 
-- **前端** `public/index.html`：纯静态页，含全部棋盘绘制与胜负判定逻辑。
-  规则仍由「房主」浏览器权威计算，与之前保持一致。
-- **后端** `server.js`：只做「房间管理 + 消息转发」，不存棋局、不做裁决。
-- **通信**：全程一条 WebSocket 连接。**不依赖 WebRTC / NAT 打洞 / TURN**，
-  因此在国内各种宽带、4G/5G 网络下都能稳定联机。
-- **断线恢复**：开启 socket.io 的 `connectionStateRecovery`，手机切后台、
-  地铁短暂断网会自动恢复会话，不会踢人。
+**为什么选它**：Cloudflare Workers 免费版 **不需要信用卡**、**永久在线**（不像 Render / Glitch 免费版要绑卡或会休眠）、国内可访问，而且前后端同源，一条命令就能部署。
+
+- 通信走**原生 WebSocket**，不依赖 WebRTC / NAT 打洞 / TURN，国内各种网络都稳。
+- 规则裁决仍在**房主浏览器**里（房主权威），服务器只做房间与消息转发。
+- `Durable Object` 每个房间一个实例，天然隔离，房间空了自动回收。
 
 ## 目录结构
 
 ```
-├── server.js            后端（Socket.IO 中继）
-├── package.json         依赖与脚本
-├── pnpm-lock.yaml       锁定依赖版本
-├── render.yaml          Render Blueprint 一键部署配置
-├── netlify.toml         Netlify 部署配置（发布 public/ 目录）
-├── .node-version        固定 Node 20
-├── public/
-│   └── index.html       游戏前端（★ 唯一需要改配置的地方）
+├── src/worker.js         Cloudflare Worker + Durable Object（生产后端）
+├── server.js             本地 Node 后端（原生 WebSocket，同一套协议，用于本地开发/自建）
+├── wrangler.toml         Cloudflare 部署配置
+├── public/index.html     游戏前端（Worker 会把它打进包里同源托管）
+├── package.json          依赖与脚本
+├── pnpm-workspace.yaml   允许 pnpm 构建 esbuild / workerd 原生二进制
+├── Dockerfile
+├── Procfile              自建 Node 后端时用（任意容器平台）
+├── netlify.toml          仅当你想把前端单独放到 Netlify 时才用
 └── test/
-    ├── e2e.js           端到端联机测试（22 项）
-    └── logic.test.js    纯游戏规则测试（23 项）
+    ├── logic.test.js     纯游戏规则（37 项）
+    ├── e2e.js            联机协议（16 项，可打本机 Node 或 Cloudflare Worker）
+    └── frontend.test.js  前端集成（14 项，加载真实 index.html 脚本跑联机）
 ```
 
-## ★ 唯一需要改的配置
-
-打开 `public/index.html`，顶部有一段：
-
-```html
-<script>
-window.GOMOKU_SERVER = '';
-</script>
-```
-
-- **本地测试**：留空 `''` 即可（自动连当前页面同源）。
-- **线上部署**：改成你的 Render 后端地址，例如：
-
-```html
-window.GOMOKU_SERVER = 'https://threefive.onrender.com';
-```
-
-> 注意：不要带结尾的 `/`。改完把最新版 `public/index.html` 再发布到 Netlify 一次。
+前后端使用**同一套 JSON 协议**（见 `src/worker.js` 顶部注释），所以本地 Node 版和线上 Worker 版行为一致，测试用例可以复用。
 
 ---
 
 ## 本地运行
 
-```bash
-# 安装依赖（任选其一）
-pnpm install      # 或  npm install
+需要 **Node.js 18+**（[官网下载](https://nodejs.org/)；国内可用 [npmmirror 镜像](https://npmmirror.com/mirrors/node/)）。
 
-# 启动（默认端口 3000）
-node server.js
-# 或  npm start
+```bash
+pnpm install        # 或 npm install
+npm start           # 启动本地后端，同时托管前端
 ```
 
-浏览器打开 `http://localhost:3000`。想要多人联机测试，开多个标签页或手机访问同一局域网 IP 即可。
+浏览器打开 <http://localhost:3000>，开多个标签页就能本地联机测试。
 
-运行测试：
+想让手机在同一 WiFi 下参与，用电脑的局域网 IP 访问，例如 `http://192.168.1.5:3000`。
+
+跑测试：
 
 ```bash
-node test/logic.test.js   # 纯规则测试
-node test/e2e.js          # 端到端联机测试（会自动起一个测试服务）
+npm test                # 规则 + 协议 + 前端集成，共 67 项
+npm run dev:cf          # 起本地 Cloudflare Worker 运行时（wrangler dev）
+npm run test:worker     # 另开终端，用同一套协议测试打 Worker
 ```
 
 ---
 
-## 部署（三步）
+## 部署到 Cloudflare Workers（推荐，一条命令）
 
-### 第 1 步：把代码推送到 GitHub
+### 前置
+
+1. **Node.js 18+**（同上）。
+2. **免费 Cloudflare 账号**：<https://dash.cloudflare.com/sign-up> —— 只需邮箱，**不需要信用卡**。
+
+### 部署
+
+在仓库目录执行：
 
 ```bash
-cd ~/Desktop/gomoku-server
-git add -A
-git commit -m "改用 Socket.IO 中继架构，支持远程联机"
-git push -u origin main        # 或 master，以你本地分支为准
+npx wrangler login     # 会自动打开浏览器，点授权即可
+npx wrangler deploy
 ```
 
-> 远端仓库 `https://github.com/shix9769/threefive.git` 目前是空的，首次 push 用 `-u` 建立关联。
+看到 `Deployed threefive-gomoku triggers` 那一行里的地址，形如：
 
-### 第 2 步：Render 部署后端
+```
+https://threefive-gomoku.你的子域.workers.dev
+```
 
-**方式 A —— Blueprint 一键部署（推荐）**
+**这个地址就是完整游戏**：直接打开就能玩，不用再配任何东西。
 
-1. 打开 <https://render.com>，注册/登录（建议用 GitHub 账号）。
-2. 点 **New +** → **Blueprint**。
-3. 关联 `shix9769/threefive` 仓库，Render 会读取 `render.yaml` 自动创建 Web 服务。
-4. 等待部署完成，复制它给你的地址，形如 `https://threefive.onrender.com`。
+> `npx wrangler deploy` 会自动读取 `wrangler.toml`、把 `public/index.html` 打进 Worker、创建 Durable Object，全程无需手改配置。
 
-**方式 B —— 手动创建 Web 服务**
+### 部署后自测
 
-1. Render 控制台点 **New +** → **Web Service**，关联仓库。
-2. 按下面填：
+```bash
+curl https://threefive-gomoku.你的子域.workers.dev/healthz
+# 期望输出 {"ok":true,"rooms":0}
+```
 
-| 配置项 | 值 |
-|---|---|
-| Build Command | `npm install` |
-| Start Command | `npm start` |
-| Instance Type | Free |
+---
 
-3. 等部署完成，记下 `https://<服务名>.onrender.com` 这个地址。
+## 备选方案
 
-> 免费实例空闲约 15 分钟会休眠，下次访问有约 30~60 秒冷启动，属正常现象。
-> 首次打开时如果报「无法连接服务器」，**等 1 分钟再刷新**即可。
+### A. 前端单独放 Netlify，后端在 Workers
 
-> **免绑卡的替代后端平台**：Render 免费版需要绑卡做验证。若不想绑卡，可改用以下任一平台，部署方式几乎相同（都支持 GitHub 关联 + WebSocket；仓库已带 `Dockerfile`，会自动构建）：
->
-> - **Zeabur**（推荐，中文界面、国内访问快）：[zeabur.com](https://zeabur.com) → 用 GitHub 登录 → 新建项目 → 关联本仓库 → 部署，得到 `https://xxx.zeabur.app`。
-> - **Koyeb**：[koyeb.com](https://www.koyeb.com) → Create Web Service → 关联本仓库 → 选 **Free** 实例 → 健康检查把协议改成 **HTTP**、路径填 `/healthz` → Deploy，得到 `https://xxx.koyeb.app`。
-> - **Glitch**（免卡但会休眠、国内访问不稳，仅兜底）：[glitch.com](https://glitch.com) → New Project → Import from GitHub → 选本仓库。
->
-> 无论用哪个，拿到后端地址后同样填进下面第 4 步的 `window.GOMOKU_SERVER` 即可。
+如果你更喜欢 Netlify 的静态托管：
 
-### 第 3 步：Netlify 部署前端
+1. Netlify 导入本仓库，发布目录设为 `public`（仓库已带 `netlify.toml`）。
+2. 把 `public/index.html` 顶部的 `window.GOMOKU_SERVER` 改成你的 Worker 地址：
 
-1. 打开 <https://app.netlify.com>，用 GitHub 登录。
-2. **Add new site** → **Import an existing project** → 选 `threefive` 仓库。
-3. Netlify 会读取 `netlify.toml`（发布目录已设为 `public`）。若它要求手动填：
-   - Build command：留空
-   - Publish directory：`public`
-4. Deploy 完成后，你会得到一个 `https://xxx.netlify.app` 地址。
+```js
+window.GOMOKU_SERVER = 'https://threefive-gomoku.你的子域.workers.dev';
+```
 
-> **可选**：也可以不进 Git 流程，直接打开 Netlify 的 **Sites** 页面，把本地 `public/`
-> 文件夹整个拖进去（Drag & drop）。只是这样以后每次改代码要重新拖。
+3. 重新部署前端。后端仍在 Workers 上，跨域没问题（Worker 已允许任意来源）。
 
-### 第 4 步：把后端地址写进前端（关键！）
+### B. 完全自建（自己的电脑 / 任意服务器）
 
-1. 回到本地，打开 `public/index.html`，把 `window.GOMOKU_SERVER` 改成第 2 步拿到的 Render 地址。
-2. 重新推送到 GitHub（Netlify 会自动重新部署），或重新拖拽到 Netlify。
+`server.js` 是和 Worker 同协议的 Node 版，任何能跑 Node 的地方都能用：
+
+```bash
+npm install && npm start      # 默认 3000 端口
+```
+
+- 有公网服务器：直接跑，把 `window.GOMOKU_SERVER` 指过去。
+- 只有自己的电脑：配合内网穿透（如 `cloudflared tunnel --url http://localhost:3000`）把端口暴露出去，注意电脑要保持开机。
 
 ---
 
 ## 怎么玩
 
-1. 房主打开链接，页面会生成一个 4 位房间号，并把链接变成 `https://xxx.netlify.app#房间号`。
+1. 打开部署好的地址，页面会生成一个 4 位房间号，地址变成 `...#房间号`。
 2. 点「分享链接」发给朋友；朋友点开即自动进房。
-3. 房主在等待界面可选模式：**三人自由战 / 四人自由战 / 四人组队 2v2**；每位玩家在等待界面点色块选自己的棋子颜色（自由战四色不重复；组队时颜色即队伍，同色为队友）。
-4. 玩家到齐自动开局；先连成五子者胜。自由战中胜出者锁定名次，其余人继续对决直到排出全部名次。
+3. 房主在等待界面选模式：**三人自由战 / 四人自由战 / 四人组队 2v2**；每位玩家点色块选自己的棋子颜色（自由战四色不重复；组队时颜色即队伍，同色为队友）。
+4. 玩家到齐自动开局；先连成五子者胜。自由战中胜出者锁定名次，其余人继续对决，直到排出全部名次。
+
+键盘也能下：方向键移动，回车 / 空格落子。
 
 ---
 
-## 常见问题（FAQ）
+## 常见问题
 
-**Q：朋友打开链接一直「无法连接服务器」？**
-A：先确认第 4 步的 `window.GOMOKU_SERVER` 已改成 Render 地址并重新发布前端；
-Render 免费实例冷启动要 30~60 秒，多等一会儿刷新。
+**Q：Cloudflare 免费版够用吗？会收费吗？**
+A：够。免费版每天 10 万次请求，本游戏一次对局只有几十次消息，完全用不完；Cloudflare 免费版不需要绑卡，不会自动扣费。
+
+**Q：页面打不开 / 一直「无法连接服务器」？**
+A：先 `curl <你的地址>/healthz` 看后端是否正常。若前端单独部署到别处，检查 `window.GOMOKU_SERVER` 是否填对（不带结尾斜杠）。
 
 **Q：房主关掉页面会怎样？**
-A：后端会保留房间约 90 秒，期间房主重开页面可恢复；超时后房客会看到「房间已解散」。
+A：后端保留房间约 90 秒，期间房主刷新/重连可恢复；超时后房客看到「房间已解散」。
 
-**Q：有人掉线卡住了？**
-A：已修复。掉线玩家的轮次会自动顺延给下一个在线玩家，不会再整局卡死。
+**Q：有人掉线会卡住吗？**
+A：不会。掉线玩家的轮次会自动顺延给下一个在线玩家；90 秒内重连（同一标签页）还能回到原座位。
 
-**Q：想自己改规则 / 棋盘大小？**
-A：前端逻辑都在 `public/index.html` 里，`N`（棋盘尺寸，默认 25）、`COLORS`（棋子颜色）、`MODES`（玩法）都在文件开头的
-游戏脚本内，改完重新发布前端即可，后端无需动。
+**Q：想改棋盘大小 / 颜色 / 玩法？**
+A：都在 `public/index.html` 开头的游戏脚本里：`N`（棋盘尺寸，默认 25）、`COLORS`（颜色）、`MODES`（玩法）。改完 `npx wrangler deploy` 重新部署即可，后端不用动。
 
-**Q：Render 免费版会睡怎么办？**
-A：这是免费版限制。保持有人在线游玩就不会休眠；或升级 Render 付费实例即常驻。
+**Q：手机屏幕小，25×25 太密？**
+A：可以旋转横屏，或把 `N` 改小后重新部署。
